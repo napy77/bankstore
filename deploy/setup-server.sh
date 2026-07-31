@@ -37,6 +37,23 @@ if [[ ! -f "$CONFIG" ]]; then
        chmod 600 $CONFIG
        vi $CONFIG"
 fi
+# Un valor con espacios y sin comillas hace que `source` intente EJECUTAR lo
+# que viene después del primer espacio. El error de bash ("No such file or
+# directory: 172.16.0.0/12") no dice en qué línea ni por qué, así que conviene
+# detectarlo acá y explicarlo. Pasa con ADMIN_ALLOWED_CIDRS, que es el único
+# valor multi-palabra del archivo.
+mala_linea=$(grep -nE "^[A-Z_]+=[^\"'#]*[[:space:]]" "$CONFIG" || true)
+if [[ -n "$mala_linea" ]]; then
+  die "Hay un valor con espacios sin comillas en $CONFIG:
+
+       $mala_linea
+
+     Bash toma sólo lo que va hasta el primer espacio y trata de ejecutar el
+     resto como un comando. Ponelo entre comillas:
+
+       ADMIN_ALLOWED_CIDRS=\"10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1\""
+fi
+
 # shellcheck disable=SC1090
 source "$CONFIG"
 
