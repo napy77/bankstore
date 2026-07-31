@@ -1,0 +1,15 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+
+# Los .env llevan secretos (DATABASE_URL con contraseña, JWT_SECRET).
+# En el servidor los genera deploy/setup-server.sh; nunca se versionan.
+.env
+.env.*
+!.env.example
+
+# Postgres local si alguien levanta el cluster dentro del repo
+pgdata/

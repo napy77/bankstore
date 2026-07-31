@@ -1,0 +1,11 @@
+// Sólo para typechequear el seed, que cruza el límite backend/frontend y por
+// eso no entra en el build (ver el comentario en tsconfig.json).
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".."
+  },
+  "include": ["src/seed.ts", "../src/data", "../src/types.ts"],
+  "exclude": []
+}

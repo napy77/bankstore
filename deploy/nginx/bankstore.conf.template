@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Bankstore — un solo server block sirve todo:
+#
+#   __DOMAIN__/          → estáticos del frontend (__APP_DIR__/dist)
+#   __DOMAIN__/api/      → backend Express (127.0.0.1:__API_PORT__)
+#
+# Al compartir dominio no hay CORS ni preflight, y alcanza con un certificado.
+#
+# Este archivo lo genera setup-server.sh desde la plantilla. Después certbot
+# le agrega el bloque 443: a partir de ahí NO se regenera solo (ver el aviso
+# en setup-server.sh).
+# ─────────────────────────────────────────────────────────────────────────────
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __DOMAIN__;
+
+    # Los assets con hash en el nombre (index-Cf1kdCvC.js) son inmutables:
+    # si cambia el contenido cambia el nombre, así que se pueden cachear para
+    # siempre sin miedo a servir una versión vieja.
+    location /assets/ {
+        root __APP_DIR__/dist;
+        access_log off;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:__API_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    location = /health {
+        proxy_pass http://127.0.0.1:__API_PORT__/health;
+        access_log off;
+    }
+
+    # El frontend es una SPA: cualquier ruta que no sea un archivo real tiene
+    # que devolver index.html para que el router del cliente la resuelva. Sin
+    # esto, recargar en /producto/prod-2 daría 404.
+    location / {
+        root __APP_DIR__/dist;
+        try_files $uri $uri/ /index.html;
+
+        # index.html NO se cachea: es el que apunta a los assets nuevos después
+        # de cada deploy. Si se cachea, el navegador sigue pidiendo los viejos.
+        location = /index.html {
+            add_header Cache-Control "no-cache, must-revalidate";
+        }
+    }
+
+    # Cabeceras de seguridad básicas
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    client_max_body_size 2m;
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+    gzip_min_length 1024;
+}

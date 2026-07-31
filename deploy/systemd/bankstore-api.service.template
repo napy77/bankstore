@@ -1,0 +1,41 @@
+[Unit]
+Description=Bankstore API (Express)
+Documentation=https://github.com/napy77/bankstore
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__/backend
+# Las variables sensibles (DATABASE_URL, JWT_SECRET) viven en el .env del
+# backend con permisos 600, no acá: este archivo lo lee cualquiera.
+EnvironmentFile=__APP_DIR__/backend/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node dist/index.js
+
+Restart=always
+RestartSec=5
+# Si arranca y muere 5 veces en 60s hay un problema de verdad (base caída,
+# .env roto): que pare y se vea en el status, en lugar de reintentar para
+# siempre y llenar el journal.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bankstore-api
+
+# Endurecimiento: el proceso no necesita escribir en ningún lado. Todo el
+# estado está en Postgres, así que no hace falta ningún ReadWritePaths.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
