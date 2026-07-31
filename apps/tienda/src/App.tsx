@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { PRODUCTS } from './data/products';
-import { INITIAL_CARDS, BANKS } from './data/banks';
+import { INITIAL_CARDS } from './data/banks';
+import { fetchProducts, fetchBanks, fetchCategories, type Category } from './api';
+import type { Bank } from './types';
 import { CardWalletSection } from './components/CardWalletSection';
 import { ProductCard } from './components/ProductCard';
 import { ProductDetailsModal } from './components/ProductDetailsModal';
@@ -30,12 +31,28 @@ import {
   X
 } from 'lucide-react';
 
+/** El select de la tienda usa otros valores que la API. */
+const SORT_API: Record<string, 'relevance' | 'price_asc' | 'price_desc' | 'discount' | 'cuotas'> = {
+  relevance: 'relevance',
+  'price-asc': 'price_asc',
+  'price-desc': 'price_desc',
+  discount: 'discount',
+  cuotas: 'cuotas',
+};
+
 export default function App() {
   // --- STATE ---
   const [cards, setCards] = useState<CreditCard[]>(INITIAL_CARDS);
   const [selectedCard, setSelectedCard] = useState<CreditCard | null>(INITIAL_CARDS[0]);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [activeCategory, setActiveCategory] = useState<string>('all');
+
+  // --- CATÁLOGO (de la API) ---
+  const [products, setProducts] = useState<Product[]>([]);
+  const [banks, setBanks] = useState<Bank[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [loadingCatalog, setLoadingCatalog] = useState<boolean>(true);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [sortBy, setSortBy] = useState<string>('relevance');
   
@@ -116,33 +133,46 @@ export default function App() {
     );
   };
 
-  // --- FILTERED PRODUCTS ---
-  const filteredProducts = useMemo(() => {
-    return PRODUCTS.filter((p) => {
-      const matchCat = activeCategory === 'all' || p.category === activeCategory;
-      const matchSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        p.description.toLowerCase().includes(searchQuery.toLowerCase());
-      return matchCat && matchSearch;
-    }).sort((a, b) => {
-      if (sortBy === 'price-asc') return a.price - b.price;
-      if (sortBy === 'price-desc') return b.price - a.price;
-      if (sortBy === 'discount') {
-        const discA = a.originalPrice ? (a.originalPrice - a.price) / a.originalPrice : 0;
-        const discB = b.originalPrice ? (b.originalPrice - b.price) / b.originalPrice : 0;
-        return discB - discA;
-      }
-      if (sortBy === 'cuotas') {
-        const maxCuotasA = selectedCard
-          ? a.bankOffers.find((o) => o.bankId === selectedCard.bankId)?.maxCuotas || 1
-          : Math.max(...a.bankOffers.map((o) => o.maxCuotas));
-        const maxCuotasB = selectedCard
-          ? b.bankOffers.find((o) => o.bankId === selectedCard.bankId)?.maxCuotas || 1
-          : Math.max(...b.bankOffers.map((o) => o.maxCuotas));
-        return maxCuotasB - maxCuotasA;
-      }
-      return 0; // relevance
-    });
-  }, [activeCategory, searchQuery, sortBy, selectedCard]);
+  // --- CARGA DEL CATÁLOGO ---
+  // Los bancos y las categorías cambian poco: se piden una sola vez.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    Promise.all([fetchBanks(ctrl.signal), fetchCategories(ctrl.signal)])
+      .then(([b, c]) => { setBanks(b); setCategories(c); })
+      .catch((err) => { if (err.name !== 'AbortError') console.error(err); });
+    return () => ctrl.abort();
+  }, []);
+
+  // El filtrado y el orden los hace el servidor, no el navegador. Es lo que
+  // permite que un producto recién publicado aparezca y que el catálogo de un
+  // comercio suspendido desaparezca sin que la tienda tenga que saber nada de
+  // eso: la consulta ya excluye lo que no corresponde.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    // Espera antes de buscar: sin esto cada tecla dispara una request.
+    const t = setTimeout(() => {
+      setLoadingCatalog(true);
+      setCatalogError(null);
+      fetchProducts(
+        {
+          category: activeCategory,
+          search: searchQuery.trim() || undefined,
+          sort: SORT_API[sortBy] ?? 'relevance',
+        },
+        ctrl.signal
+      )
+        .then(setProducts)
+        .catch((err) => {
+          if (err.name === 'AbortError') return;
+          setCatalogError(err.message ?? 'No pude cargar el catálogo');
+        })
+        .finally(() => { if (!ctrl.signal.aborted) setLoadingCatalog(false); });
+    }, searchQuery ? 300 : 0);
+
+    return () => { clearTimeout(t); ctrl.abort(); };
+  }, [activeCategory, searchQuery, sortBy]);
+
+  const filteredProducts = products;
 
   // Derived dashboard details
   const savingsAmount = useMemo(() => {
@@ -230,6 +260,7 @@ export default function App() {
 
         {/* 3. Card Wallet Controller */}
         <CardWalletSection
+            banks={banks}
           cards={cards}
           selectedCard={selectedCard}
           onSelectCard={handleSelectCard}
@@ -243,11 +274,9 @@ export default function App() {
           <div className="flex gap-1.5 overflow-x-auto w-full lg:w-auto pb-2 lg:pb-0 select-none">
             {[
               { id: 'all', label: 'Todos' },
-              { id: 'tecnologia', label: 'Tecnología' },
-              { id: 'electrohogar', label: 'Electrohogar' },
-              { id: 'turismo', label: 'Turismo / Viajes' },
-              { id: 'deportes', label: 'Deportes' },
-              { id: 'moda', label: 'Moda' }
+              // Las categorías salen de la API: si un comercio publica en una
+              // nueva (ferretería, hotelería), aparece sola.
+              ...categories.map((c) => ({ id: c.id, label: c.name }))
             ].map((cat) => (
               <button
                 type="button"
@@ -302,7 +331,21 @@ export default function App() {
 
         {/* 5. Products Grid Showcase */}
         <div>
-          {filteredProducts.length === 0 ? (
+          {catalogError ? (
+            <div className="bg-rose-50 border border-rose-100 rounded-3xl p-12 text-center">
+              <Info size={32} className="text-rose-400 mx-auto mb-3" />
+              <p className="text-rose-800 font-bold">No pudimos cargar el catálogo</p>
+              <p className="text-xs text-rose-600 mt-1">{catalogError}</p>
+            </div>
+          ) : loadingCatalog && filteredProducts.length === 0 ? (
+            /* Esqueletos en vez de spinner: la grilla no salta cuando llegan
+               los productos. */
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-6">
+              {[0, 1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className="bg-white border border-slate-200/60 rounded-3xl h-96 animate-pulse" />
+              ))}
+            </div>
+          ) : filteredProducts.length === 0 ? (
             <div className="bg-white border border-slate-200 rounded-3xl p-12 text-center shadow-sm">
               <Info size={32} className="text-slate-400 mx-auto mb-3" />
               <p className="text-slate-800 font-bold">No se encontraron productos</p>
@@ -412,6 +455,7 @@ export default function App() {
 
       {/* Checkout Payment Wizard Modal */}
       <CheckoutModal
+          banks={banks}
         isOpen={isCheckoutOpen}
         onClose={() => setIsCheckoutOpen(false)}
         cart={cart}

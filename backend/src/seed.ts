@@ -12,7 +12,7 @@
  */
 import bcrypt from "bcryptjs";
 import { pool, runMigrations } from "./db.js";
-import { BANKS, INITIAL_CARDS } from "../../apps/tienda/src/data/banks.js";
+import { INITIAL_CARDS } from "../../apps/tienda/src/data/banks.js";
 import { PRODUCTS } from "../../apps/tienda/src/data/products.js";
 
 const CATEGORIES: Record<string, string> = {
@@ -22,6 +22,9 @@ const CATEGORIES: Record<string, string> = {
   deportes: "Deportes",
   moda: "Moda",
 };
+
+/** Comercio dueño del catálogo del prototipo. */
+const CATALOG_MERCHANT = process.env.SEED_MERCHANT ?? "electro-1";
 
 const DEMO_USER = {
   email: process.env.SEED_EMAIL ?? "demo@bankstore.test",
@@ -44,55 +47,34 @@ async function seed() {
     }
     console.log(`[seed] ${Object.keys(CATEGORIES).length} categorías`);
 
-    // El comercio dueño del catálogo del prototipo. En una base que viene de
-    // la maqueta ya lo creó la migración 002; en una base nueva las categorías
-    // todavía no existían cuando esa migración corrió, así que hay que
-    // habilitárselas acá o el trigger rechaza todos los productos de abajo.
-    await client.query(
-      `INSERT INTO merchants (id, legal_name, trade_name, status, commission_percent)
-       VALUES ('bankstore-demo','Bankstore Demo S.A.','Bankstore','active',0.08)
-       ON CONFLICT (id) DO NOTHING`
+    // El catálogo del prototipo es de Electro Sur, que tiene login y panel: así
+    // se puede publicar y despublicar de verdad. Lo crea seed-marketplace.ts,
+    // que corre ANTES que este seed (ver deploy.sh).
+    const { rows: dueño } = await client.query(
+      "SELECT 1 FROM merchants WHERE id = $1",
+      [CATALOG_MERCHANT]
     );
+    if (!dueño[0]) {
+      throw new Error(
+        `No existe el comercio "${CATALOG_MERCHANT}". Corré primero: npm run seed:marketplace`
+      );
+    }
+    // El catálogo cruza cinco categorías, no sólo las dos de un electro. El
+    // trigger de la base rechaza publicar en una no habilitada, así que se
+    // habilitan acá.
     for (const id of Object.keys(CATEGORIES)) {
       await client.query(
-        "INSERT INTO merchant_categories VALUES ('bankstore-demo',$1) ON CONFLICT DO NOTHING",
-        [id]
+        "INSERT INTO merchant_categories VALUES ($1,$2) ON CONFLICT DO NOTHING",
+        [CATALOG_MERCHANT, id]
       );
     }
-
-    for (const bank of BANKS) {
-      await client.query(
-        `INSERT INTO banks (id, name, logo_color, accent_color, text_color) VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (id) DO UPDATE SET
-           name = EXCLUDED.name, logo_color = EXCLUDED.logo_color,
-           accent_color = EXCLUDED.accent_color, text_color = EXCLUDED.text_color`,
-        [bank.id, bank.name, bank.logoColor, bank.accentColor, bank.textColor]
-      );
-      for (const promo of bank.promos) {
-        // Las promos del prototipo entran como acuerdos GLOBALES por categoría
-        // (merchant_id NULL): valen para todos los comercios, que es el alcance
-        // que tenían cuando había una sola tienda. Los acuerdos exclusivos de
-        // un comercio los carga seed-marketplace.ts.
-        await client.query(
-          `INSERT INTO bank_agreements (bank_id, merchant_id, category_id, max_cuotas,
-                                        discount_percent, cap_amount, description)
-           VALUES ($1,NULL,$2,$3,$4,$5,$6)
-           ON CONFLICT (bank_id, merchant_id, category_id) DO UPDATE SET
-             max_cuotas = EXCLUDED.max_cuotas, discount_percent = EXCLUDED.discount_percent,
-             cap_amount = EXCLUDED.cap_amount, description = EXCLUDED.description`,
-          [bank.id, promo.category, promo.maxCuotas, promo.discountPercent / 100,
-           promo.capAmount ?? null, promo.description]
-        );
-      }
-    }
-    console.log(`[seed] ${BANKS.length} bancos y sus acuerdos globales`);
 
     for (const p of PRODUCTS) {
       await client.query(
         `INSERT INTO products (id, name, description, price, original_price, category_id,
                                rating, reviews_count, image, stock, specs, features,
                                merchant_id, sku)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'bankstore-demo',$1)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$1)
          ON CONFLICT (id) DO UPDATE SET
            name = EXCLUDED.name, description = EXCLUDED.description, price = EXCLUDED.price,
            original_price = EXCLUDED.original_price, category_id = EXCLUDED.category_id,
@@ -101,7 +83,7 @@ async function seed() {
            features = EXCLUDED.features, updated_at = now()`,
         [p.id, p.name, p.description, p.price, p.originalPrice ?? null, p.category,
          p.rating, p.reviewsCount, p.image, p.stock,
-         JSON.stringify(p.specs ?? []), JSON.stringify(p.features ?? [])]
+         JSON.stringify(p.specs ?? []), JSON.stringify(p.features ?? []), CATALOG_MERCHANT]
       );
       for (const offer of p.bankOffers) {
         await client.query(
@@ -115,7 +97,7 @@ async function seed() {
         );
       }
     }
-    console.log(`[seed] ${PRODUCTS.length} productos y sus ofertas`);
+    console.log(`[seed] ${PRODUCTS.length} productos y sus ofertas en ${CATALOG_MERCHANT}`);
 
     // Usuario de prueba con la billetera del prototipo
     const hash = await bcrypt.hash(DEMO_USER.password, 12);

@@ -6,11 +6,13 @@
  * Idempotente: se puede correr las veces que haga falta. No toca órdenes ni
  * compradores; sólo da de alta o refresca la estructura del marketplace.
  *
- * Corre después de `npm run seed`, que carga el catálogo del prototipo.
+ * Corre ANTES de `npm run seed`: crea las categorías, los bancos y los
+ * comercios que el catálogo necesita para poder publicarse.
  */
 import bcrypt from "bcryptjs";
 import { pool, runMigrations } from "./db.js";
 import { generateApiKey } from "./middleware/apikey.js";
+import { BANKS } from "../../apps/tienda/src/data/banks.js";
 
 const CATEGORIAS: [string, string, string | null][] = [
   ["tecnologia", "Tecnología", null],
@@ -107,6 +109,34 @@ async function seed() {
       );
     }
     console.log(`[seed] ${CATEGORIAS.length} categorías`);
+
+    // Los bancos y sus promos generales. Van acá y no en el seed del catálogo
+    // porque son estructura de la plataforma —igual que las categorías y los
+    // comercios— y porque los acuerdos de más abajo los referencian.
+    for (const bank of BANKS) {
+      await client.query(
+        `INSERT INTO banks (id, name, logo_color, accent_color, text_color) VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (id) DO UPDATE SET
+           name = EXCLUDED.name, logo_color = EXCLUDED.logo_color,
+           accent_color = EXCLUDED.accent_color, text_color = EXCLUDED.text_color`,
+        [bank.id, bank.name, bank.logoColor, bank.accentColor, bank.textColor]
+      );
+      // Las promos del prototipo entran como acuerdos GLOBALES por categoría
+      // (merchant_id NULL): valen para todos los comercios.
+      for (const promo of bank.promos) {
+        await client.query(
+          `INSERT INTO bank_agreements (bank_id, merchant_id, category_id, max_cuotas,
+                                        discount_percent, cap_amount, description)
+           VALUES ($1,NULL,$2,$3,$4,$5,$6)
+           ON CONFLICT (bank_id, merchant_id, category_id) DO UPDATE SET
+             max_cuotas = EXCLUDED.max_cuotas, discount_percent = EXCLUDED.discount_percent,
+             cap_amount = EXCLUDED.cap_amount, description = EXCLUDED.description`,
+          [bank.id, promo.category, promo.maxCuotas, promo.discountPercent / 100,
+           promo.capAmount ?? null, promo.description]
+        );
+      }
+    }
+    console.log(`[seed] ${BANKS.length} bancos y sus acuerdos globales`);
 
     for (const c of COMERCIOS) {
       await client.query(

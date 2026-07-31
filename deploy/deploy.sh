@@ -148,20 +148,23 @@ if [[ "${SEED_DEMO_DATA:-false}" == "true" ]]; then
   say "Cargando datos de demo"
   # El seed es idempotente (todo con ON CONFLICT DO UPDATE): no pisa las
   # órdenes ni los usuarios reales, sólo refresca catálogo y bancos.
-  SEED_EMAIL="${SEED_EMAIL:-demo@bankstore.test}" \
-  SEED_PASSWORD="${SEED_PASSWORD:-bankstore2026}" \
-    run npm run seed --workspace bankstore-backend || warn "El seed del catálogo falló; el resto del deploy está bien."
-
-  # Comercios, usuarios de back-office y acuerdos. Va aparte porque en una
-  # instalación real el catálogo se carga distinto pero los comercios y el
-  # admin siguen haciendo falta.
+  # Orden: primero los comercios, después el catálogo. El catálogo del
+  # prototipo se publica bajo Electro Sur, así que ese comercio tiene que
+  # existir antes; al revés el seed corta con un mensaje claro.
   #
   # Las API keys sólo se generan la primera vez: el secreto no se puede
   # recuperar, así que regenerarlas rompería integraciones ya configuradas.
   ADMIN_EMAIL="${ADMIN_EMAIL:-admin@bankstore.test}" \
   ADMIN_PASSWORD="${ADMIN_PASSWORD:-bankstore-admin-2026}" \
   MERCHANT_PASSWORD="${MERCHANT_PASSWORD:-comercio-2026-demo}" \
-    run npm run seed:marketplace --workspace bankstore-backend || warn "El seed de comercios falló."
+    run npm run seed:marketplace --workspace bankstore-backend ||
+      warn "El seed de comercios falló."
+
+  SEED_EMAIL="${SEED_EMAIL:-demo@bankstore.test}" \
+  SEED_PASSWORD="${SEED_PASSWORD:-bankstore2026}" \
+    run npm run seed --workspace bankstore-backend ||
+      warn "El seed del catálogo falló; el resto del deploy está bien."
+
 else
   ok "SEED_DEMO_DATA no está en true: no se toca el catálogo"
 fi

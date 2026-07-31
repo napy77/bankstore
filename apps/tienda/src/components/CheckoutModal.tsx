@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { CartItem, CreditCard, Purchase } from '../types';
+import { CartItem, CreditCard, Purchase, Bank } from '../types';
 import { CardVisualizer } from './CardVisualizer';
-import { BANKS } from '../data/banks';
 import { X, ArrowRight, ArrowLeft, Check, CheckCircle2, ShieldCheck, Truck, DollarSign, Calendar, Landmark, MapPin, ReceiptText, ChevronRight } from 'lucide-react';
 
 interface CheckoutModalProps {
   isOpen: boolean;
+  /** Bancos disponibles, de la API. */
+  banks: Bank[];
   onClose: () => void;
   cart: CartItem[];
   availableCards: CreditCard[];
@@ -20,6 +21,7 @@ type Step = 'review' | 'financing' | 'shipping' | 'success';
 
 export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   isOpen,
+  banks,
   onClose,
   cart,
   availableCards,
@@ -84,7 +86,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const monthlyInstallment = totalFinancedAmount / installments;
 
   // Selected Card Promos / Savings
-  const currentBank = selectedCard ? BANKS.find((b) => b.id === selectedCard.bankId) : null;
+  const currentBank = selectedCard ? banks.find((b) => b.id === selectedCard.bankId) : null;
   const getEstimatedReintegro = () => {
     if (!selectedCard || !currentBank) return 0;
     let totalDiscount = 0;

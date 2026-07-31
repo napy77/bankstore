@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { CreditCard, CardBrand, CardTier } from '../types';
+import { CreditCard, CardBrand, CardTier, Bank } from '../types';
 import { CardVisualizer } from './CardVisualizer';
-import { BANKS } from '../data/banks';
 import { Plus, X, Landmark, CreditCard as CardIcon, DollarSign, Wallet, ShieldCheck, CheckCircle2 } from 'lucide-react';
 
 interface CardWalletSectionProps {
   cards: CreditCard[];
+  /** Bancos disponibles, de la API. Antes venían de un archivo estático. */
+  banks: Bank[];
   selectedCard: CreditCard | null;
   onSelectCard: (card: CreditCard) => void;
   onAddCard: (card: CreditCard) => void;
@@ -14,6 +15,7 @@ interface CardWalletSectionProps {
 
 export const CardWalletSection: React.FC<CardWalletSectionProps> = ({
   cards,
+  banks,
   selectedCard,
   onSelectCard,
   onAddCard,
@@ -30,7 +32,7 @@ export const CardWalletSection: React.FC<CardWalletSectionProps> = ({
 
   const handleCreateCard = (e: React.FormEvent) => {
     e.preventDefault();
-    const bank = BANKS.find((b) => b.id === newCard.bankId);
+    const bank = banks.find((b) => b.id === newCard.bankId);
     const bankName = bank ? bank.name : 'Banco Ciudad';
 
     // Simulate standard masked card number
@@ -147,7 +149,7 @@ export const CardWalletSection: React.FC<CardWalletSectionProps> = ({
                     brand: newCard.brand,
                     tier: newCard.tier,
                     bankId: newCard.bankId,
-                    bankName: BANKS.find((b) => b.id === newCard.bankId)?.name || 'Banco Ciudad',
+                    bankName: banks.find((b) => b.id === newCard.bankId)?.name || 'Banco',
                     limit: newCard.limit,
                     availableLimit: newCard.limit,
                     colorTheme: newCard.colorTheme
@@ -186,7 +188,7 @@ export const CardWalletSection: React.FC<CardWalletSectionProps> = ({
                       }}
                       className="w-full bg-slate-50 text-slate-800 border border-slate-200 rounded-xl p-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
                     >
-                      {BANKS.map((b) => (
+                      {banks.map((b) => (
                         <option key={b.id} value={b.id}>
                           {b.name}
                         </option>

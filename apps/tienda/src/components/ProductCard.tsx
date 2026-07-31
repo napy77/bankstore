@@ -1,7 +1,6 @@
 import React from 'react';
 import { motion } from 'motion/react';
 import { Product, CreditCard } from '../types';
-import { BANKS } from '../data/banks';
 import { Star, CreditCard as CardIcon, ShoppingBag, Percent, Eye } from 'lucide-react';
 
 interface ProductCardProps {

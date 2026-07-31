@@ -18,5 +18,5 @@
   // El seed importa el catálogo del frontend (../../src/data), que queda fuera
   // de rootDir y rompería el build. No hace falta compilarlo: es una tarea de
   // operación que se corre con tsx. Se typechequea con tsconfig.seed.json.
-  "exclude": ["src/seed.ts"]
+  "exclude": ["src/seed.ts", "src/seed-marketplace.ts"]
 }

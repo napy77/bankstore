@@ -193,10 +193,28 @@ catalogRouter.get("/products", async (req, res, next) => {
 
     res.json({
       total: rows[0]?.total ?? 0,
-      items: rows.map((p) => ({
-        ...serializePublic(p),
-        bestOffer: bestBenefit(p, offers.get(p.id) ?? [], agreements, bankNames),
-      })),
+      items: rows.map((p) => {
+        const productOffers = offers.get(p.id) ?? [];
+        return {
+          ...serializePublic(p),
+          bestOffer: bestBenefit(p, productOffers, agreements, bankNames),
+          // Beneficio resuelto por banco. Va en el listado y no sólo en el
+          // detalle porque la tienda necesita repintar las cards apenas el
+          // cliente cambia de tarjeta, sin ir a buscar producto por producto.
+          benefits: [...bankNames.keys()]
+            .map((bankId) => ({
+              ...resolveBenefit(
+                bankId,
+                p.merchant_id,
+                p.category_id,
+                productOffers.find((o) => o.bank_id === bankId),
+                agreements
+              ),
+              bankName: bankNames.get(bankId)!,
+            }))
+            .filter((b) => b.source !== "none"),
+        };
+      }),
     });
   } catch (err) {
     next(err);
@@ -301,11 +319,18 @@ catalogRouter.get("/banks", async (_req, res, next) => {
 catalogRouter.get("/categories", async (_req, res, next) => {
   try {
     const { rows } = await pool.query(
+      // El comercio va con EXISTS y no con un LEFT JOIN: en el LEFT JOIN la
+      // condición sobre `merchants` no descarta la fila del producto, sólo
+      // deja el comercio en NULL, así que COUNT(p.id) seguía contando el
+      // catálogo de los comercios suspendidos. La barra de categorías mostraba
+      // rubros que al abrirlos aparecían vacíos.
       `SELECT c.id, c.name, c.parent_id,
               COUNT(p.id)::int AS product_count
        FROM product_categories c
-       LEFT JOIN products p ON p.category_id = c.id AND p.active
-       LEFT JOIN merchants m ON m.id = p.merchant_id AND m.status = 'active'
+       LEFT JOIN products p
+         ON p.category_id = c.id AND p.active
+        AND EXISTS (SELECT 1 FROM merchants m
+                    WHERE m.id = p.merchant_id AND m.status = 'active')
        WHERE c.active
        GROUP BY c.id ORDER BY c.name`
     );
