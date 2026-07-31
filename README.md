@@ -1,7 +1,7 @@
 # Bankstore
 
-Marketplace bancario: catálogo con simulador de cuotas, beneficios por
-banco/tarjeta, billetera y checkout.
+Marketplace bancario multi-comercio: catálogo de varios vendedores, simulador
+de cuotas, beneficios por banco/comercio, billetera y checkout con sub-órdenes.
 
 - **Frontend** — diseñado con Google Stitch / AI Studio, migrado a proyecto propio.
 - **Backend** — Express + PostgreSQL, con toda la lógica de precios, cuotas y beneficios.
@@ -27,7 +27,7 @@ docker compose up -d
 Backend (puerto 4020):
 
 ```bash
-cd backend && npm install && npm run migrate && npm run seed && npm run dev
+cd backend && npm install && npm run migrate && npm run seed && npm run seed:marketplace && npm run dev
 ```
 
 Frontend (puerto 3200):
@@ -36,7 +36,16 @@ Frontend (puerto 3200):
 npm install && npm run dev
 ```
 
-Usuario de prueba: `demo@bankstore.test` / `bankstore2026`
+Cuentas de prueba que deja el seed:
+
+| Ámbito | Usuario | Contraseña |
+| --- | --- | --- |
+| Comprador | `demo@bankstore.test` | `bankstore2026` |
+| Plataforma | `admin@bankstore.test` | `bankstore-admin-2026` |
+| Comercio | `admin@electro-1.test` (y uno por comercio) | `comercio-2026-demo` |
+
+`seed:marketplace` imprime además una API key por comercio. Se muestran una
+sola vez: guardalas o revocalas y generá otras desde el panel.
 
 Los puertos evitan a los otros proyectos de la VM: NexoPOS usa 3000/4000 y
 ClubPay 3100/4010.
@@ -59,11 +68,18 @@ absorbe el arrastre del redondeo para que el crédito cierre en cero.
 El prototipo calculaba `tea = tna * 1.25` y `cft = tea * 1.15`, que no son
 fórmulas financieras sino factores elegidos a ojo.
 
-### `backend/src/lib/promos.ts`
+### `backend/src/lib/agreements.ts`
 
-Resuelve qué beneficio aplica: la oferta puntual del producto le gana a la
-promo de categoría del banco. El **tope de reintegro es por cuenta y categoría**,
-no por producto: dos televisores no reintegran dos veces el tope.
+Resuelve qué beneficio aplica cuando varias reglas del mismo banco calzan sobre
+la misma compra. **Gana el acuerdo más específico, no el más generoso**:
+
+```
+comercio + categoría  >  comercio  >  categoría  >  global
+```
+
+Por encima de todo está la oferta puntual del producto. El **tope de reintegro
+es por cuenta y por acuerdo**, no por producto ni por comercio: dos productos
+amparados por el mismo acuerdo comparten un solo tope.
 
 El reintegro **no es un descuento** — no baja lo que se financia ni lo que se
 cobra hoy; se acredita después en el resumen.
@@ -84,8 +100,25 @@ piden `Authorization: Bearer <token>`.
 | `GET` | `/api/cards` | Billetera del usuario |
 | `POST` | `/api/cards` | Vincular tarjeta (valida Luhn, deduce la marca) |
 | `DELETE` | `/api/cards/:id` | Desvincular |
-| `POST` | `/api/orders` | Checkout |
+| `POST` | `/api/orders` | Checkout (parte la orden por comercio) |
 | `GET` | `/api/orders` · `/:id` | Historial y comprobante |
+
+Back-office — dos ámbitos separados, con tokens que no se cruzan:
+
+| Método | Ruta | Quién |
+| --- | --- | --- |
+| `POST` | `/api/staff/login` | Plataforma y comercios |
+| `*` | `/api/admin/merchants` · `/staff` · `/agreements` · `/settlements` | Sólo plataforma |
+| `*` | `/api/merchant/products` · `/orders` · `/api-keys` | Sólo el comercio dueño |
+
+Integración del sistema del comercio, con `X-API-Key`:
+
+| Método | Ruta | Qué hace |
+| --- | --- | --- |
+| `GET` | `/api/v1/ping` | Verificar la clave y ver categorías permitidas |
+| `PUT` | `/api/v1/products` | Sincronizar catálogo, idempotente por SKU |
+| `PATCH` | `/api/v1/stock` | Sólo stock |
+| `GET` | `/api/v1/orders` | Ventas del comercio |
 
 ### Decisiones que conviene conocer
 
@@ -103,9 +136,14 @@ no gasten el mismo límite ni el mismo stock.
 **Idempotencia.** El checkout acepta `idempotencyKey`; repetir la request
 devuelve la orden que ya existe en vez de cobrar de nuevo.
 
-**Los comprobantes congelan los datos.** Nombre del banco, del producto y
-últimos 4 quedan copiados en la orden: si mañana cambia el catálogo, el
-comprobante viejo sigue diciendo lo que decía.
+**Los comprobantes congelan los datos.** Nombre del banco, del producto,
+últimos 4 y el porcentaje de comisión quedan copiados en la orden: si mañana
+cambia el catálogo o se renegocia la comisión, lo viejo sigue diciendo lo que
+decía.
+
+**Gana el acuerdo más específico, no el más generoso.** Un acuerdo del banco
+con un comercio reemplaza al general, para bien o para mal. Está explicado en
+[docs/ARQUITECTURA.md](docs/ARQUITECTURA.md).
 
 ## Scripts
 
@@ -125,6 +163,7 @@ Backend (`backend/`):
 | `npm run build` | Compila a `dist/` |
 | `npm run migrate` | Aplica las migraciones pendientes |
 | `npm run seed` | Carga bancos, productos y usuario demo |
+| `npm run seed:marketplace` | Carga comercios, back-office y acuerdos |
 | `npm test` | Tests del motor financiero |
 | `npm run typecheck` | `tsc --noEmit` |
 
@@ -138,19 +177,32 @@ src/                        Frontend
   components/               Wallet, ProductCard, simulador, carrito, checkout
 
 backend/
-  migrations/001_initial.sql
+  migrations/
+    001_initial.sql         Catálogo, billetera, órdenes
+    002_marketplace.sql     Comercios, back-office, acuerdos, sub-órdenes
   src/
-    index.ts                Montaje de routers
+    index.ts                Montaje de routers y guards
     config.ts               Puerto, base, JWT, tasas financieras
     db.ts                   Pool y runner de migraciones
-    seed.ts                 Carga los datos del prototipo en la base
+    seed.ts                 Catálogo del prototipo
+    seed-marketplace.ts     Comercios, usuarios de back-office y acuerdos
     lib/
       installments.ts       Sistema francés, TNA/TEA/CFT
-      promos.ts             Resolución de beneficios y topes
+      agreements.ts         Resolución de acuerdos por especificidad y topes
+      products.ts           Alta/actualización compartida panel + API
       money.ts              Redondeo a centavos
-    middleware/             auth (JWT), error (HttpError + zod)
-    modules/                auth, catalog, cards, orders
-  test/                     Tests del motor financiero
+    middleware/
+      auth.ts               JWT de comprador
+      staff.ts              JWT de back-office y guards por rol
+      apikey.ts             Claves de integración (hash, scopes)
+      error.ts              HttpError + zod
+    modules/
+      auth, catalog, cards, orders       compradores
+      staff-auth, admin, merchant        back-office
+      integration                        /api/v1 con API key
+  test/                     Motor financiero y resolución de acuerdos
+
+docs/ARQUITECTURA.md        Cómo encaja todo
 
 deploy/                     Instalación y despliegue en la VM (ver deploy/README.md)
 ```

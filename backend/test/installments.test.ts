@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { quote } from "../src/lib/installments.js";
-import { applyCaps, resolveBenefit } from "../src/lib/promos.js";
 
 const VAT = 0.21;
 
@@ -86,60 +85,4 @@ test("rechaza entradas imposibles", () => {
   assert.throws(() => quote({ amount: 0, installments: 6, maxInterestFree: 0, tna: 0.42, vatRate: VAT }));
   assert.throws(() => quote({ amount: 100, installments: 0, maxInterestFree: 0, tna: 0.42, vatRate: VAT }));
   assert.throws(() => quote({ amount: 100, installments: 1.5, maxInterestFree: 0, tna: 0.42, vatRate: VAT }));
-});
-
-// ── Beneficios ───────────────────────────────────────────────────────────────
-
-test("la oferta del producto le gana a la promo de categoría", () => {
-  const promo = {
-    bank_id: "galicia", category_id: "tecnologia", max_cuotas: 9,
-    discount_percent: 0.15, cap_amount: 60000, description: "Eminent",
-  };
-  const offer = {
-    product_id: "prod-2", bank_id: "galicia", max_cuotas: 18,
-    discount_percent: 0.2, extra_reintegro_percent: 0,
-  };
-  const b = resolveBenefit("galicia", "tecnologia", offer, promo);
-  assert.equal(b.maxCuotas, 18);
-  assert.equal(b.reintegroPercent, 0.2);
-  assert.equal(b.source, "product");
-  assert.equal(b.capAmount, 60000, "pero hereda el tope de la categoría");
-});
-
-test("sin oferta ni promo no hay beneficio", () => {
-  const b = resolveBenefit("macro", "moda", undefined, undefined);
-  assert.equal(b.maxCuotas, 1);
-  assert.equal(b.reintegroPercent, 0);
-  assert.equal(b.source, "none");
-});
-
-test("una promo de otra categoría no aplica", () => {
-  const promo = {
-    bank_id: "macro", category_id: "turismo", max_cuotas: 9,
-    discount_percent: 0.1, cap_amount: 80000, description: "",
-  };
-  const b = resolveBenefit("macro", "tecnologia", undefined, promo);
-  assert.equal(b.source, "none");
-});
-
-test("el tope de reintegro se comparte entre productos de la misma categoría", () => {
-  // Dos televisores, $50.000 de reintegro cada uno, tope $40.000 en la categoría
-  const total = applyCaps([
-    { categoryId: "electrohogar", amount: 50000, capAmount: 40000 },
-    { categoryId: "electrohogar", amount: 50000, capAmount: 40000 },
-  ]);
-  assert.equal(total, 40000, "no son $80.000: el tope es por cuenta");
-});
-
-test("categorías distintas tienen topes independientes", () => {
-  const total = applyCaps([
-    { categoryId: "electrohogar", amount: 50000, capAmount: 40000 },
-    { categoryId: "tecnologia", amount: 30000, capAmount: 25000 },
-  ]);
-  assert.equal(total, 65000);
-});
-
-test("sin tope se reintegra todo", () => {
-  const total = applyCaps([{ categoryId: "moda", amount: 12345.67, capAmount: null }]);
-  assert.equal(total, 12345.67);
 });

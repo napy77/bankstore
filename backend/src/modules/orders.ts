@@ -4,19 +4,24 @@ import { pool } from "../db.js";
 import { HttpError } from "../middleware/error.js";
 import { config } from "../config.js";
 import { quote } from "../lib/installments.js";
-import { applyCaps, resolveBenefit, type BankPromoRow, type ProductOfferRow } from "../lib/promos.js";
+import { applyCaps, resolveBenefit, type AgreementRow, type ProductOfferRow } from "../lib/agreements.js";
 import { round2 } from "../lib/money.js";
 
 export const ordersRouter = Router();
 
 /**
- * Checkout.
+ * Checkout del marketplace.
  *
- * Regla que no se negocia: el cliente manda QUÉ quiere comprar (producto,
- * cantidad, tarjeta, cuotas) y nada más. El precio, el descuento, el interés,
- * la cuota y el reintegro los calcula el servidor leyendo la base. Si el
- * frontend mandara los montos, cualquiera con la consola abierta compraría el
- * televisor a $1.
+ * Dos reglas que no se negocian:
+ *
+ *  1. El cliente manda QUÉ quiere comprar (producto, cantidad, tarjeta,
+ *     cuotas) y nada más. Precio, interés, cuota, reintegro y comisión los
+ *     calcula el servidor leyendo la base.
+ *
+ *  2. El pago es UNO solo —una tarjeta, un plan de cuotas, un resumen— pero
+ *     por debajo la orden se parte en una sub-orden por comercio, que es la
+ *     unidad de despacho y de liquidación. El comprador ve una compra; cada
+ *     comercio ve la suya.
  */
 
 const checkoutSchema = z.object({
@@ -28,16 +33,34 @@ const checkoutSchema = z.object({
       })
     )
     .min(1, "El carrito está vacío")
-    .max(20),
+    .max(30),
   cardId: z.coerce.number().int(),
   installments: z.coerce.number().int().min(1).max(24),
-  /**
-   * Clave del intento de compra, generada por el frontend. Si el usuario hace
-   * doble click o se corta la red y reintenta, la segunda request devuelve la
-   * orden que ya se creó en vez de cobrar dos veces.
-   */
   idempotencyKey: z.string().min(8).max(64).optional(),
 });
+
+/** Fila de products + las condiciones comerciales del comercio dueño. */
+interface ProductoConComercio {
+  id: string;
+  name: string;
+  price: number;
+  original_price: number | null;
+  category_id: string;
+  stock: number;
+  merchant_id: string;
+  merchant_status: string;
+  trade_name: string;
+  commission_percent: number;
+  absorbs_installment_cost: boolean;
+  settlement_days: number;
+}
+
+interface LineaResuelta {
+  product: ProductoConComercio;
+  quantity: number;
+  lineTotal: number;
+  maxCuotas: number;
+}
 
 /** POST /api/orders */
 ordersRouter.post("/", async (req, res, next) => {
@@ -46,11 +69,9 @@ ordersRouter.post("/", async (req, res, next) => {
     const body = checkoutSchema.parse(req.body);
     const userId = req.auth.userId;
 
-    // Se chequea antes de abrir la transacción: si ya existe, no hay nada que
-    // bloquear ni escribir.
     if (body.idempotencyKey) {
       const { rows } = await pool.query(
-        "SELECT id, order_number FROM orders WHERE user_id = $1 AND idempotency_key = $2",
+        "SELECT id FROM orders WHERE user_id = $1 AND idempotency_key = $2",
         [userId, body.idempotencyKey]
       );
       if (rows[0]) {
@@ -62,8 +83,6 @@ ordersRouter.post("/", async (req, res, next) => {
     await client.query("BEGIN");
 
     // ── Tarjeta ──────────────────────────────────────────────────────────────
-    // FOR UPDATE: dos compras simultáneas con la misma tarjeta no pueden leer
-    // el mismo límite disponible y gastarlo dos veces.
     const { rows: cardRows } = await client.query(
       `SELECT c.*, b.name AS bank_name
        FROM cards c JOIN banks b ON b.id = c.bank_id
@@ -72,7 +91,6 @@ ordersRouter.post("/", async (req, res, next) => {
     );
     const card = cardRows[0];
     if (!card) throw new HttpError(404, "Tarjeta no encontrada en tu billetera");
-
     const expiry = new Date(card.expiry_year, card.expiry_month, 0, 23, 59, 59);
     if (expiry < new Date()) throw new HttpError(400, "Esa tarjeta está vencida");
 
@@ -82,23 +100,38 @@ ordersRouter.post("/", async (req, res, next) => {
       throw new HttpError(400, "Hay productos repetidos: mandá una sola línea por producto");
     }
 
-    const { rows: products } = await client.query(
-      `SELECT id, name, price, original_price, category_id, stock
-       FROM products WHERE id = ANY($1) AND active FOR UPDATE`,
+    // Sólo se puede comprar de comercios activos: uno suspendido no vende
+    // aunque su catálogo siga publicado.
+    const { rows: products } = await client.query<ProductoConComercio>(
+      `SELECT p.id, p.name, p.price, p.original_price, p.category_id, p.stock, p.merchant_id,
+              m.status AS merchant_status, m.trade_name, m.commission_percent,
+              m.absorbs_installment_cost, m.settlement_days
+       FROM products p JOIN merchants m ON m.id = p.merchant_id
+       WHERE p.id = ANY($1) AND p.active
+       ORDER BY p.id
+       FOR UPDATE OF p`,
       [productIds]
     );
     if (products.length !== productIds.length) {
       throw new HttpError(400, "Alguno de los productos ya no está disponible");
     }
+    const suspendido = products.find((p) => p.merchant_status !== "active");
+    if (suspendido) {
+      throw new HttpError(400, `"${suspendido.name}" no está disponible en este momento`);
+    }
     const byId = new Map(products.map((p) => [p.id, p]));
 
-    const { rows: promos } = await client.query<BankPromoRow>(
-      `SELECT bank_id, category_id, max_cuotas, discount_percent, cap_amount, description
-       FROM bank_promos
-       WHERE bank_id = $1
+    // ── Acuerdos del banco de la tarjeta ─────────────────────────────────────
+    const merchantIds = [...new Set(products.map((p) => p.merchant_id))];
+    const { rows: agreements } = await client.query<AgreementRow>(
+      `SELECT id, bank_id, merchant_id, category_id, max_cuotas, discount_percent,
+              cap_amount, description, priority
+       FROM bank_agreements
+       WHERE bank_id = $1 AND active
+         AND (merchant_id IS NULL OR merchant_id = ANY($2))
          AND (valid_from IS NULL OR valid_from <= CURRENT_DATE)
          AND (valid_to   IS NULL OR valid_to   >= CURRENT_DATE)`,
-      [card.bank_id]
+      [card.bank_id, merchantIds]
     );
     const { rows: offers } = await client.query<ProductOfferRow>(
       `SELECT product_id, bank_id, max_cuotas, discount_percent, extra_reintegro_percent
@@ -106,39 +139,42 @@ ordersRouter.post("/", async (req, res, next) => {
       [productIds, card.bank_id]
     );
 
-    // ── Precios y beneficios ─────────────────────────────────────────────────
-    let subtotal = 0;      // a precio de lista (original_price), para mostrar el ahorro
-    let saleTotal = 0;     // lo que se financia
-    const reintegroLines: { categoryId: string; amount: number; capAmount: number | null }[] = [];
-    // El plan de cuotas sin interés del carrito es el del producto más
-    // restrictivo: no se puede dar 24 cuotas por un item que sólo tiene 6.
+    // ── Precios y beneficios, línea por línea ────────────────────────────────
+    let subtotalLista = 0;   // a precio tachado, para mostrar el ahorro
+    let saleTotal = 0;       // lo que se financia
+    const reintegroLines: { capKey: string; amount: number; capAmount: number | null }[] = [];
+    const lineas: LineaResuelta[] = [];
+
+    // El plan sin interés del carrito es el del producto MÁS restrictivo. Si un
+    // ítem sólo tiene 6 cuotas, no se pueden dar 24 por el carrito entero: el
+    // banco no lo bancaría y alguien tendría que comerse la diferencia.
     let maxInterestFree = Infinity;
 
-    const lines = body.items.map((item) => {
+    for (const item of body.items) {
       const product = byId.get(item.productId)!;
       if (product.stock < item.quantity) {
         throw new HttpError(400, `Stock insuficiente de "${product.name}" (quedan ${product.stock})`);
       }
       const lineTotal = round2(product.price * item.quantity);
-      subtotal = round2(subtotal + (product.original_price ?? product.price) * item.quantity);
+      subtotalLista = round2(subtotalLista + (product.original_price ?? product.price) * item.quantity);
       saleTotal = round2(saleTotal + lineTotal);
 
       const benefit = resolveBenefit(
         card.bank_id,
+        product.merchant_id,
         product.category_id,
         offers.find((o) => o.product_id === product.id),
-        promos.find((p) => p.category_id === product.category_id)
+        agreements
       );
       maxInterestFree = Math.min(maxInterestFree, benefit.maxCuotas);
       reintegroLines.push({
-        categoryId: product.category_id,
+        capKey: benefit.capKey,
         amount: round2(lineTotal * benefit.reintegroPercent),
         capAmount: benefit.capAmount,
       });
 
-      return { product, quantity: item.quantity, unitPrice: product.price };
-    });
-
+      lineas.push({ product, quantity: item.quantity, lineTotal, maxCuotas: benefit.maxCuotas });
+    }
     if (maxInterestFree === Infinity) maxInterestFree = 1;
 
     const financing = quote({
@@ -149,8 +185,6 @@ ordersRouter.post("/", async (req, res, next) => {
       vatRate: config.finance.ivaSobreIntereses,
     });
 
-    // El límite se consume por el total financiado, no por el precio de lista:
-    // los intereses también ocupan límite en la tarjeta.
     if (Number(card.available_limit) < financing.totalAmount) {
       throw new HttpError(
         400,
@@ -161,16 +195,41 @@ ordersRouter.post("/", async (req, res, next) => {
 
     const reintegro = applyCaps(reintegroLines);
 
+    // ── Reparto por comercio ─────────────────────────────────────────────────
+    // El costo de las cuotas sin interés se prorratea según cuánto puso cada
+    // comercio en la orden. Un comercio que aportó el 30% del carrito se come
+    // el 30% del costo financiero, no la mitad por ser dos.
+    const porComercio = new Map<string, { lineas: LineaResuelta[]; subtotal: number }>();
+    for (const linea of lineas) {
+      const acc = porComercio.get(linea.product.merchant_id) ?? { lineas: [], subtotal: 0 };
+      acc.lineas.push(linea);
+      acc.subtotal = round2(acc.subtotal + linea.lineTotal);
+      porComercio.set(linea.product.merchant_id, acc);
+    }
+
+    // Cuando las cuotas son sin interés el banco no cobra recargo, pero el
+    // costo existe igual: es la quita que el comercio acepta a cambio de la
+    // promo. Se estima con lo que habría costado financiar ese monto.
+    const costoFinancieroTotal = financing.interestFree
+      ? round2(
+          quote({
+            amount: saleTotal,
+            installments: body.installments,
+            maxInterestFree: 0,
+            tna: config.finance.tnaDefault,
+            vatRate: config.finance.ivaSobreIntereses,
+          }).interestAmount
+        )
+      : 0;
+
     // ── Escritura ────────────────────────────────────────────────────────────
-    for (const line of lines) {
+    for (const linea of lineas) {
       await client.query("UPDATE products SET stock = stock - $2, updated_at = now() WHERE id = $1", [
-        line.product.id,
-        line.quantity,
+        linea.product.id, linea.quantity,
       ]);
     }
     await client.query("UPDATE cards SET available_limit = available_limit - $2 WHERE id = $1", [
-      card.id,
-      financing.totalAmount,
+      card.id, financing.totalAmount,
     ]);
 
     const {
@@ -182,37 +241,74 @@ ordersRouter.post("/", async (req, res, next) => {
     } = await client.query(
       `INSERT INTO orders (order_number, user_id, card_id, bank_id, bank_name, card_brand, card_last4,
                            installments, subtotal, discount_amount, total_amount, interest_amount,
-                           installment_amount, reintegro_amount, tna, tea, cft, idempotency_key)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                           installment_amount, reintegro_amount, tna, tea, cft,
+                           idempotency_key, merchant_count)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
        RETURNING id`,
       [
         next_number, userId, card.id, card.bank_id, card.bank_name, card.brand, card.last4,
-        body.installments, subtotal, round2(subtotal - saleTotal), financing.totalAmount,
+        body.installments, subtotalLista, round2(subtotalLista - saleTotal), financing.totalAmount,
         financing.interestAmount, financing.installmentAmount, reintegro,
         financing.tna, financing.tea, financing.cft, body.idempotencyKey ?? null,
+        porComercio.size,
       ]
     );
 
-    for (const line of lines) {
-      await client.query(
-        `INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [order.id, line.product.id, line.product.name, line.quantity, line.unitPrice]
+    for (const [merchantId, grupo] of porComercio) {
+      // Las condiciones vienen del mismo JOIN: todas las líneas de este grupo
+      // son del mismo comercio, así que alcanza con mirar la primera.
+      const merchant = grupo.lineas[0]!.product;
+      const commissionPercent = Number(merchant.commission_percent);
+      const commissionAmount = round2(grupo.subtotal * commissionPercent);
+
+      const participacion = saleTotal === 0 ? 0 : grupo.subtotal / saleTotal;
+      const installmentCost = merchant.absorbs_installment_cost
+        ? round2(costoFinancieroTotal * participacion)
+        : 0;
+
+      const payout = round2(grupo.subtotal - commissionAmount - installmentCost);
+
+      // Numeración propia de cada comercio, la que usa para su gestión interna.
+      const {
+        rows: [{ next_mo }],
+      } = await client.query(
+        "SELECT COALESCE(MAX(merchant_order_number), 0) + 1 AS next_mo FROM merchant_orders WHERE merchant_id = $1",
+        [merchantId]
       );
+
+      const {
+        rows: [mo],
+      } = await client.query(
+        `INSERT INTO merchant_orders (order_id, merchant_id, merchant_order_number, subtotal,
+                                      commission_percent, commission_amount, installment_cost,
+                                      payout_amount, settlement_date)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8, CURRENT_DATE + $9::int)
+         RETURNING id`,
+        [order.id, merchantId, next_mo, grupo.subtotal, commissionPercent, commissionAmount,
+         installmentCost, payout, merchant.settlement_days]
+      );
+
+      for (const linea of grupo.lineas) {
+        await client.query(
+          `INSERT INTO order_items (order_id, merchant_order_id, product_id, product_name, quantity, unit_price)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [order.id, mo.id, linea.product.id, linea.product.name, linea.quantity, linea.product.price]
+        );
+      }
     }
 
     await client.query(
       `INSERT INTO audit_log (user_id, action, entity, entity_id, payload)
        VALUES ($1,'order.create','orders',$2,$3)`,
-      [userId, String(order.id), JSON.stringify({ total: financing.totalAmount, installments: body.installments })]
+      [userId, String(order.id),
+       JSON.stringify({ total: financing.totalAmount, installments: body.installments,
+                        comercios: [...porComercio.keys()] })]
     );
 
     await client.query("COMMIT");
     res.status(201).json(await getOrder(order.id, userId));
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
-    // Si dos requests idénticas entran a la vez, la segunda choca contra el
-    // UNIQUE de idempotency_key. No es un error: es la protección funcionando.
     if (typeof err === "object" && err && (err as { code?: string }).code === "23505") {
       next(new HttpError(409, "Esa compra ya se está procesando"));
       return;
@@ -224,27 +320,44 @@ ordersRouter.post("/", async (req, res, next) => {
 });
 
 async function getOrder(orderId: number, userId: number) {
-  const { rows } = await pool.query(
-    "SELECT * FROM orders WHERE id = $1 AND user_id = $2",
-    [orderId, userId]
-  );
+  const { rows } = await pool.query("SELECT * FROM orders WHERE id = $1 AND user_id = $2", [
+    orderId, userId,
+  ]);
   const order = rows[0];
   if (!order) return null;
-  const { rows: items } = await pool.query(
-    "SELECT product_id, product_name, quantity, unit_price FROM order_items WHERE order_id = $1",
+
+  // El comprador ve una sola compra, pero agrupada por comercio: es lo que
+  // necesita para saber quién le despacha cada cosa.
+  const { rows: grupos } = await pool.query(
+    `SELECT mo.id, mo.merchant_id, m.trade_name, mo.merchant_order_number, mo.status, mo.subtotal,
+            COALESCE(json_agg(json_build_object(
+              'productId', i.product_id, 'productName', i.product_name,
+              'quantity', i.quantity, 'price', i.unit_price
+            ) ORDER BY i.id) FILTER (WHERE i.id IS NOT NULL), '[]') AS items
+     FROM merchant_orders mo
+     JOIN merchants m ON m.id = mo.merchant_id
+     LEFT JOIN order_items i ON i.merchant_order_id = mo.id
+     WHERE mo.order_id = $1
+     GROUP BY mo.id, m.trade_name
+     ORDER BY m.trade_name`,
     [orderId]
   );
+
   return {
     id: order.id,
     orderNumber: order.order_number,
     date: order.created_at,
     status: order.status,
-    items: items.map((i) => ({
-      productId: i.product_id,
-      productName: i.product_name,
-      quantity: i.quantity,
-      price: i.unit_price,
+    merchants: grupos.map((g) => ({
+      merchantId: g.merchant_id,
+      merchantName: g.trade_name,
+      merchantOrderNumber: g.merchant_order_number,
+      status: g.status,
+      subtotal: g.subtotal,
+      items: g.items,
     })),
+    // Aplanado, para el comprobante y para quien no le interesa el corte.
+    items: grupos.flatMap((g) => g.items),
     cardUsed: {
       bankName: order.bank_name,
       brand: order.card_brand,
@@ -268,7 +381,8 @@ ordersRouter.get("/", async (req, res, next) => {
   try {
     const { rows } = await pool.query(
       `SELECT o.id, o.order_number, o.created_at, o.total_amount, o.installments,
-              o.installment_amount, o.reintegro_amount, o.bank_name, o.card_brand, o.card_last4,
+              o.installment_amount, o.reintegro_amount, o.bank_name, o.card_brand,
+              o.card_last4, o.merchant_count,
               COUNT(i.id)::int AS item_count
        FROM orders o LEFT JOIN order_items i ON i.order_id = o.id
        WHERE o.user_id = $1

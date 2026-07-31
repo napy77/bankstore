@@ -72,7 +72,10 @@ authRouter.get("/me", async (req, res, next) => {
     if (!header?.startsWith("Bearer ")) throw new HttpError(401, "Token requerido");
     const { verify } = await import("jsonwebtoken");
     const { config } = await import("../config.js");
-    const payload = verify(header.slice(7), config.jwtSecret) as { userId: number };
+    const { CUSTOMER_AUDIENCE } = await import("../middleware/auth.js");
+    const payload = verify(header.slice(7), config.jwtSecret, {
+      audience: CUSTOMER_AUDIENCE,
+    }) as { userId: number };
     const { rows } = await pool.query("SELECT id, email, name FROM users WHERE id = $1", [
       payload.userId,
     ]);

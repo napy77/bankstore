@@ -127,7 +127,18 @@ if [[ "${SEED_DEMO_DATA:-false}" == "true" ]]; then
   # órdenes ni los usuarios reales, sólo refresca catálogo y bancos.
   SEED_EMAIL="${SEED_EMAIL:-demo@bankstore.test}" \
   SEED_PASSWORD="${SEED_PASSWORD:-bankstore2026}" \
-    run npm run seed --prefix backend || warn "El seed falló; el resto del deploy está bien."
+    run npm run seed --prefix backend || warn "El seed del catálogo falló; el resto del deploy está bien."
+
+  # Comercios, usuarios de back-office y acuerdos. Va aparte porque en una
+  # instalación real el catálogo se carga distinto pero los comercios y el
+  # admin siguen haciendo falta.
+  #
+  # Las API keys sólo se generan la primera vez: el secreto no se puede
+  # recuperar, así que regenerarlas rompería integraciones ya configuradas.
+  ADMIN_EMAIL="${ADMIN_EMAIL:-admin@bankstore.test}" \
+  ADMIN_PASSWORD="${ADMIN_PASSWORD:-bankstore-admin-2026}" \
+  MERCHANT_PASSWORD="${MERCHANT_PASSWORD:-comercio-2026-demo}" \
+    run npm run seed:marketplace --prefix backend || warn "El seed de comercios falló."
 else
   ok "SEED_DEMO_DATA no está en true: no se toca el catálogo"
 fi

@@ -17,8 +17,18 @@ declare global {
   }
 }
 
+/**
+ * Los tokens de comprador llevan audiencia 'customer' y los de back-office
+ * 'staff' (ver middleware/staff.ts). Es lo que impide que uno sirva para el
+ * otro aunque compartan el secreto de firma.
+ */
+export const CUSTOMER_AUDIENCE = "bankstore:customer";
+
 export function signToken(payload: AuthPayload): string {
-  return jwt.sign(payload, config.jwtSecret, { expiresIn: "12h" });
+  return jwt.sign(payload, config.jwtSecret, {
+    expiresIn: "12h",
+    audience: CUSTOMER_AUDIENCE,
+  });
 }
 
 /**
@@ -34,7 +44,9 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
     return;
   }
   try {
-    req.auth = jwt.verify(header.slice(7), config.jwtSecret) as AuthPayload;
+    req.auth = jwt.verify(header.slice(7), config.jwtSecret, {
+      audience: CUSTOMER_AUDIENCE,
+    }) as AuthPayload;
     next();
   } catch {
     res.status(401).json({ error: "Token inválido o expirado" });

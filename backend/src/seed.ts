@@ -44,6 +44,22 @@ async function seed() {
     }
     console.log(`[seed] ${Object.keys(CATEGORIES).length} categorías`);
 
+    // El comercio dueño del catálogo del prototipo. En una base que viene de
+    // la maqueta ya lo creó la migración 002; en una base nueva las categorías
+    // todavía no existían cuando esa migración corrió, así que hay que
+    // habilitárselas acá o el trigger rechaza todos los productos de abajo.
+    await client.query(
+      `INSERT INTO merchants (id, legal_name, trade_name, status, commission_percent)
+       VALUES ('bankstore-demo','Bankstore Demo S.A.','Bankstore','active',0.08)
+       ON CONFLICT (id) DO NOTHING`
+    );
+    for (const id of Object.keys(CATEGORIES)) {
+      await client.query(
+        "INSERT INTO merchant_categories VALUES ('bankstore-demo',$1) ON CONFLICT DO NOTHING",
+        [id]
+      );
+    }
+
     for (const bank of BANKS) {
       await client.query(
         `INSERT INTO banks (id, name, logo_color, accent_color, text_color) VALUES ($1,$2,$3,$4,$5)
@@ -53,10 +69,15 @@ async function seed() {
         [bank.id, bank.name, bank.logoColor, bank.accentColor, bank.textColor]
       );
       for (const promo of bank.promos) {
+        // Las promos del prototipo entran como acuerdos GLOBALES por categoría
+        // (merchant_id NULL): valen para todos los comercios, que es el alcance
+        // que tenían cuando había una sola tienda. Los acuerdos exclusivos de
+        // un comercio los carga seed-marketplace.ts.
         await client.query(
-          `INSERT INTO bank_promos (bank_id, category_id, max_cuotas, discount_percent, cap_amount, description)
-           VALUES ($1,$2,$3,$4,$5,$6)
-           ON CONFLICT (bank_id, category_id) DO UPDATE SET
+          `INSERT INTO bank_agreements (bank_id, merchant_id, category_id, max_cuotas,
+                                        discount_percent, cap_amount, description)
+           VALUES ($1,NULL,$2,$3,$4,$5,$6)
+           ON CONFLICT (bank_id, merchant_id, category_id) DO UPDATE SET
              max_cuotas = EXCLUDED.max_cuotas, discount_percent = EXCLUDED.discount_percent,
              cap_amount = EXCLUDED.cap_amount, description = EXCLUDED.description`,
           [bank.id, promo.category, promo.maxCuotas, promo.discountPercent / 100,
@@ -64,13 +85,14 @@ async function seed() {
         );
       }
     }
-    console.log(`[seed] ${BANKS.length} bancos y sus promos`);
+    console.log(`[seed] ${BANKS.length} bancos y sus acuerdos globales`);
 
     for (const p of PRODUCTS) {
       await client.query(
         `INSERT INTO products (id, name, description, price, original_price, category_id,
-                               rating, reviews_count, image, stock, specs, features)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                               rating, reviews_count, image, stock, specs, features,
+                               merchant_id, sku)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'bankstore-demo',$1)
          ON CONFLICT (id) DO UPDATE SET
            name = EXCLUDED.name, description = EXCLUDED.description, price = EXCLUDED.price,
            original_price = EXCLUDED.original_price, category_id = EXCLUDED.category_id,

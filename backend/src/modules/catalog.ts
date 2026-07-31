@@ -4,23 +4,17 @@ import { pool } from "../db.js";
 import { HttpError } from "../middleware/error.js";
 import { config } from "../config.js";
 import { quote, availableInstallments } from "../lib/installments.js";
-import { resolveBenefit, type BankPromoRow, type ProductOfferRow } from "../lib/promos.js";
+import { resolveBenefit, type AgreementRow, type ProductOfferRow } from "../lib/agreements.js";
 
 export const catalogRouter = Router();
 
 /**
- * El catálogo es público: se puede mirar la tienda sin cuenta. Los beneficios
- * concretos dependen de la tarjeta, así que el listado devuelve además la
- * MEJOR oferta disponible de todos los bancos, que es el gancho de la card.
+ * Vidriera pública del marketplace. Se puede mirar sin cuenta.
+ *
+ * Sólo se publica lo que está activo por partida doble: producto activo Y
+ * comercio activo. Suspender un comercio tiene que sacarle todo el catálogo de
+ * la vidriera al instante, sin tener que despublicar producto por producto.
  */
-
-const listQuerySchema = z.object({
-  category: z.string().optional(),
-  search: z.string().max(120).optional(),
-  sort: z.enum(["relevance", "price_asc", "price_desc", "discount", "cuotas"]).default("relevance"),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-  offset: z.coerce.number().int().min(0).default(0),
-});
 
 interface ProductRow {
   id: string;
@@ -29,6 +23,9 @@ interface ProductRow {
   price: number;
   original_price: number | null;
   category_id: string;
+  merchant_id: string;
+  trade_name: string;
+  kind: string;
   rating: number;
   reviews_count: number;
   image: string;
@@ -37,7 +34,8 @@ interface ProductRow {
   features: string[];
 }
 
-/** Las ofertas de todos los productos pedidos, en una sola consulta. */
+const PUBLICABLE = "p.active AND m.status = 'active'";
+
 async function offersFor(productIds: string[]): Promise<Map<string, ProductOfferRow[]>> {
   const map = new Map<string, ProductOfferRow[]>();
   if (productIds.length === 0) return map;
@@ -54,34 +52,46 @@ async function offersFor(productIds: string[]): Promise<Map<string, ProductOffer
   return map;
 }
 
-async function activePromos(): Promise<BankPromoRow[]> {
-  const { rows } = await pool.query<BankPromoRow>(
-    `SELECT bank_id, category_id, max_cuotas, discount_percent, cap_amount, description
-     FROM bank_promos
-     WHERE (valid_from IS NULL OR valid_from <= CURRENT_DATE)
+async function activeAgreements(): Promise<AgreementRow[]> {
+  const { rows } = await pool.query<AgreementRow>(
+    `SELECT id, bank_id, merchant_id, category_id, max_cuotas, discount_percent,
+            cap_amount, description, priority
+     FROM bank_agreements
+     WHERE active
+       AND (valid_from IS NULL OR valid_from <= CURRENT_DATE)
        AND (valid_to   IS NULL OR valid_to   >= CURRENT_DATE)`
   );
   return rows;
 }
 
 /**
- * La oferta más atractiva para mostrar en la card. "Mejor" es primero más
- * cuotas sin interés y después más reintegro: es el orden en el que el
- * cliente compara, y es el que usa el cartel del prototipo.
+ * La oferta más atractiva para el cartel de la card. "Mejor" es primero más
+ * cuotas sin interés y después más reintegro: es el orden en el que compara
+ * el cliente.
+ *
+ * Ojo con la diferencia respecto de resolveBenefit: acá se busca el mejor
+ * ENTRE BANCOS (el cliente todavía no eligió tarjeta), mientras que dentro de
+ * cada banco sigue mandando la especificidad del acuerdo.
  */
 function bestBenefit(
   product: ProductRow,
   offers: ProductOfferRow[],
-  promos: BankPromoRow[],
+  agreements: AgreementRow[],
   bankNames: Map<string, string>
 ) {
-  const bankIds = new Set([...offers.map((o) => o.bank_id), ...promos.map((p) => p.bank_id)]);
-  let best = null as null | { bankId: string; bankName: string; maxCuotas: number; reintegroPercent: number };
+  const bankIds = new Set([...offers.map((o) => o.bank_id), ...agreements.map((a) => a.bank_id)]);
+  let best = null as null | {
+    bankId: string; bankName: string; maxCuotas: number; reintegroPercent: number;
+  };
 
   for (const bankId of bankIds) {
-    const offer = offers.find((o) => o.bank_id === bankId);
-    const promo = promos.find((p) => p.bank_id === bankId && p.category_id === product.category_id);
-    const benefit = resolveBenefit(bankId, product.category_id, offer, promo);
+    const benefit = resolveBenefit(
+      bankId,
+      product.merchant_id,
+      product.category_id,
+      offers.find((o) => o.bank_id === bankId),
+      agreements
+    );
     if (benefit.source === "none") continue;
     const candidate = {
       bankId,
@@ -100,16 +110,50 @@ function bestBenefit(
   return best;
 }
 
+function serializePublic(p: ProductRow) {
+  return {
+    id: p.id,
+    name: p.name,
+    description: p.description,
+    price: p.price,
+    originalPrice: p.original_price,
+    category: p.category_id,
+    kind: p.kind,
+    merchant: { id: p.merchant_id, name: p.trade_name },
+    rating: p.rating,
+    reviewsCount: p.reviews_count,
+    image: p.image,
+    stock: p.stock,
+    specs: p.specs,
+    features: p.features,
+  };
+}
+
+// ── Listado ──────────────────────────────────────────────────────────────────
+
+const listQuerySchema = z.object({
+  category: z.string().optional(),
+  merchant: z.string().optional(),
+  search: z.string().max(120).optional(),
+  sort: z.enum(["relevance", "price_asc", "price_desc", "discount", "cuotas"]).default("relevance"),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
 /** GET /api/catalog/products */
 catalogRouter.get("/products", async (req, res, next) => {
   try {
     const q = listQuerySchema.parse(req.query);
 
-    const where: string[] = ["p.active"];
+    const where: string[] = [PUBLICABLE];
     const params: unknown[] = [];
     if (q.category && q.category !== "all") {
       params.push(q.category);
       where.push(`p.category_id = $${params.length}`);
+    }
+    if (q.merchant) {
+      params.push(q.merchant);
+      where.push(`p.merchant_id = $${params.length}`);
     }
     if (q.search) {
       params.push(q.search);
@@ -124,24 +168,23 @@ catalogRouter.get("/products", async (req, res, next) => {
       relevance: "p.reviews_count DESC, p.rating DESC",
       price_asc: "p.price ASC",
       price_desc: "p.price DESC",
-      // Mayor descuento sobre el precio de lista
       discount: "COALESCE((p.original_price - p.price) / NULLIF(p.original_price, 0), 0) DESC",
       cuotas: "max_cuotas DESC NULLS LAST",
     }[q.sort];
 
     params.push(q.limit, q.offset);
     const { rows } = await pool.query<ProductRow & { max_cuotas: number | null; total: number }>(
-      `SELECT p.*,
+      `SELECT p.*, m.trade_name,
               (SELECT MAX(o.max_cuotas) FROM product_bank_offers o WHERE o.product_id = p.id) AS max_cuotas,
               COUNT(*) OVER () AS total
-       FROM products p
+       FROM products p JOIN merchants m ON m.id = p.merchant_id
        WHERE ${where.join(" AND ")}
        ORDER BY ${orderBy}
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
 
-    const promos = await activePromos();
+    const agreements = await activeAgreements();
     const offers = await offersFor(rows.map((r) => r.id));
     const { rows: banks } = await pool.query<{ id: string; name: string }>(
       "SELECT id, name FROM banks WHERE active"
@@ -151,19 +194,8 @@ catalogRouter.get("/products", async (req, res, next) => {
     res.json({
       total: rows[0]?.total ?? 0,
       items: rows.map((p) => ({
-        id: p.id,
-        name: p.name,
-        description: p.description,
-        price: p.price,
-        originalPrice: p.original_price,
-        category: p.category_id,
-        rating: p.rating,
-        reviewsCount: p.reviews_count,
-        image: p.image,
-        stock: p.stock,
-        specs: p.specs,
-        features: p.features,
-        bestOffer: bestBenefit(p, offers.get(p.id) ?? [], promos, bankNames),
+        ...serializePublic(p),
+        bestOffer: bestBenefit(p, offers.get(p.id) ?? [], agreements, bankNames),
       })),
     });
   } catch (err) {
@@ -171,65 +203,76 @@ catalogRouter.get("/products", async (req, res, next) => {
   }
 });
 
-/**
- * GET /api/catalog/products/:id
- * Detalle con el beneficio resuelto para cada banco, para que el frontend
- * pueda pintar el simulador sin volver a pedir nada.
- */
+/** GET /api/catalog/products/:id — detalle con el beneficio de cada banco */
 catalogRouter.get("/products/:id", async (req, res, next) => {
   try {
     const { rows } = await pool.query<ProductRow>(
-      "SELECT * FROM products WHERE id = $1 AND active",
+      `SELECT p.*, m.trade_name FROM products p JOIN merchants m ON m.id = p.merchant_id
+       WHERE p.id = $1 AND ${PUBLICABLE}`,
       [req.params.id]
     );
     const product = rows[0];
     if (!product) throw new HttpError(404, "Producto no encontrado");
 
-    const promos = await activePromos();
+    const agreements = await activeAgreements();
     const offers = (await offersFor([product.id])).get(product.id) ?? [];
     const { rows: banks } = await pool.query<{ id: string; name: string }>(
       "SELECT id, name FROM banks WHERE active ORDER BY name"
     );
 
     const benefits = banks
-      .map((bank) => {
-        const benefit = resolveBenefit(
+      .map((bank) => ({
+        ...resolveBenefit(
           bank.id,
+          product.merchant_id,
           product.category_id,
           offers.find((o) => o.bank_id === bank.id),
-          promos.find((p) => p.bank_id === bank.id && p.category_id === product.category_id)
-        );
-        return { ...benefit, bankId: bank.id, bankName: bank.name };
-      })
+          agreements
+        ),
+        bankId: bank.id,
+        bankName: bank.name,
+      }))
       .filter((b) => b.source !== "none");
 
-    res.json({
-      id: product.id,
-      name: product.name,
-      description: product.description,
-      price: product.price,
-      originalPrice: product.original_price,
-      category: product.category_id,
-      rating: product.rating,
-      reviewsCount: product.reviews_count,
-      image: product.image,
-      stock: product.stock,
-      specs: product.specs,
-      features: product.features,
-      benefits,
-    });
+    res.json({ ...serializePublic(product), benefits });
   } catch (err) {
     next(err);
   }
 });
 
-/** GET /api/catalog/banks — bancos con sus promos vigentes */
+// ── Comercios, bancos y categorías ───────────────────────────────────────────
+
+/** GET /api/catalog/merchants — las tiendas de la vidriera */
+catalogRouter.get("/merchants", async (_req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT m.id, m.trade_name,
+              COUNT(p.id)::int AS product_count,
+              COALESCE(ARRAY_AGG(DISTINCT p.category_id)
+                       FILTER (WHERE p.category_id IS NOT NULL), '{}') AS categories
+       FROM merchants m
+       LEFT JOIN products p ON p.merchant_id = m.id AND p.active
+       WHERE m.status = 'active'
+       GROUP BY m.id
+       HAVING COUNT(p.id) > 0
+       ORDER BY m.trade_name`
+    );
+    res.json(rows.map((m) => ({
+      id: m.id, name: m.trade_name,
+      productCount: m.product_count, categories: m.categories,
+    })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** GET /api/catalog/banks — bancos con sus acuerdos vigentes */
 catalogRouter.get("/banks", async (_req, res, next) => {
   try {
     const { rows: banks } = await pool.query(
       "SELECT id, name, logo_color, accent_color, text_color FROM banks WHERE active ORDER BY name"
     );
-    const promos = await activePromos();
+    const agreements = await activeAgreements();
     res.json(
       banks.map((b) => ({
         id: b.id,
@@ -237,14 +280,15 @@ catalogRouter.get("/banks", async (_req, res, next) => {
         logoColor: b.logo_color,
         accentColor: b.accent_color,
         textColor: b.text_color,
-        promos: promos
-          .filter((p) => p.bank_id === b.id)
-          .map((p) => ({
-            category: p.category_id,
-            maxCuotas: p.max_cuotas,
-            discountPercent: p.discount_percent,
-            capAmount: p.cap_amount,
-            description: p.description,
+        promos: agreements
+          .filter((a) => a.bank_id === b.id)
+          .map((a) => ({
+            category: a.category_id,
+            merchantId: a.merchant_id,
+            maxCuotas: a.max_cuotas,
+            discountPercent: a.discount_percent,
+            capAmount: a.cap_amount,
+            description: a.description,
           })),
       }))
     );
@@ -257,10 +301,13 @@ catalogRouter.get("/banks", async (_req, res, next) => {
 catalogRouter.get("/categories", async (_req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT c.id, c.name, COUNT(p.id)::int AS product_count
+      `SELECT c.id, c.name, c.parent_id,
+              COUNT(p.id)::int AS product_count
        FROM product_categories c
        LEFT JOIN products p ON p.category_id = c.id AND p.active
-       GROUP BY c.id, c.name ORDER BY c.name`
+       LEFT JOIN merchants m ON m.id = p.merchant_id AND m.status = 'active'
+       WHERE c.active
+       GROUP BY c.id ORDER BY c.name`
     );
     res.json(rows);
   } catch (err) {
@@ -268,12 +315,8 @@ catalogRouter.get("/categories", async (_req, res, next) => {
   }
 });
 
-/**
- * POST /api/catalog/simulate
- * Simulador de cuotas. Es público a propósito: el cliente tiene que poder ver
- * el costo financiero antes de crearse una cuenta. Devuelve el mismo cálculo
- * que después usa el checkout, así el número que vio es el que paga.
- */
+// ── Simulador ────────────────────────────────────────────────────────────────
+
 const simulateSchema = z.object({
   productId: z.string(),
   quantity: z.coerce.number().int().min(1).max(20).default(1),
@@ -281,23 +324,31 @@ const simulateSchema = z.object({
   installments: z.coerce.number().int().min(1).max(24).optional(),
 });
 
+/**
+ * POST /api/catalog/simulate
+ * Público a propósito: el cliente tiene que poder ver el costo financiero
+ * antes de crearse una cuenta. Usa el mismo cálculo que el checkout, así el
+ * número que vio es el que paga.
+ */
 catalogRouter.post("/simulate", async (req, res, next) => {
   try {
     const body = simulateSchema.parse(req.body);
     const { rows } = await pool.query<ProductRow>(
-      "SELECT * FROM products WHERE id = $1 AND active",
+      `SELECT p.*, m.trade_name FROM products p JOIN merchants m ON m.id = p.merchant_id
+       WHERE p.id = $1 AND ${PUBLICABLE}`,
       [body.productId]
     );
     const product = rows[0];
     if (!product) throw new HttpError(404, "Producto no encontrado");
 
-    const promos = await activePromos();
+    const agreements = await activeAgreements();
     const offers = (await offersFor([product.id])).get(product.id) ?? [];
     const benefit = resolveBenefit(
       body.bankId,
+      product.merchant_id,
       product.category_id,
       offers.find((o) => o.bank_id === body.bankId),
-      promos.find((p) => p.bank_id === body.bankId && p.category_id === product.category_id)
+      agreements
     );
 
     const amount = product.price * body.quantity;
@@ -318,7 +369,10 @@ catalogRouter.post("/simulate", async (req, res, next) => {
       benefit.capAmount === null ? grossReintegro : Math.min(grossReintegro, benefit.capAmount);
 
     res.json({
-      product: { id: product.id, name: product.name, price: product.price },
+      product: {
+        id: product.id, name: product.name, price: product.price,
+        merchant: { id: product.merchant_id, name: product.trade_name },
+      },
       quantity: body.quantity,
       benefit,
       options: availableInstallments(benefit.maxCuotas),
@@ -329,7 +383,6 @@ catalogRouter.post("/simulate", async (req, res, next) => {
         capped: benefit.capAmount !== null && grossReintegro > benefit.capAmount,
         capAmount: benefit.capAmount,
       },
-      // Lo que realmente termina costando una vez acreditado el reintegro.
       netCost: Math.round((result.totalAmount - reintegro) * 100) / 100,
     });
   } catch (err) {

@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.seed.json",
     "migrate": "tsx src/db.ts",
     "seed": "tsx src/seed.ts",
+    "seed:marketplace": "tsx src/seed-marketplace.ts",
     "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {
