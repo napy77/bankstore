@@ -232,6 +232,29 @@ NGINX_CONF=/etc/nginx/sites-available/bankstore
 # certificados y los redirects. Regenerarlo desde la plantilla los borraría y
 # los sitios volverían a HTTP, con Nginx respondiendo el certificado de otro
 # vhost ("no alternative certificate subject name matches").
+# Caso especial: viene de la versión de un solo dominio. Ese server block
+# apunta a $APP_DIR/dist, que después de pasar a monorepo ya no existe, y no
+# conoce los subdominios nuevos. Dejarlo intacto serviría un 404 en la tienda,
+# así que acá conviene frenar y decirlo, no seguir como si nada.
+if [[ -f "$NGINX_CONF" ]] && grep -q 'ssl_certificate' "$NGINX_CONF" \
+   && ! grep -q "$MERCHANT_DOMAIN" "$NGINX_CONF"; then
+  die "$NGINX_CONF es de la versión de un solo dominio.
+
+     Apunta a $APP_DIR/dist, que ya no existe: ahora cada app compila a
+     $APP_DIR/apps/<app>/dist. Si lo dejo como está, la tienda queda en 404.
+
+     Hay que regenerarlo y volver a pedir el certificado (certbot lo amplía
+     al mismo, no emite uno nuevo desde cero):
+
+       sudo rm $NGINX_CONF
+       sudo bash $HERE/setup-server.sh
+       sudo certbot --nginx -d $STORE_DOMAIN -d $MERCHANT_DOMAIN -d $ADMIN_DOMAIN --redirect
+       sudo bash $APP_DIR/deploy/deploy.sh
+
+     El certificado actual de $STORE_DOMAIN no se pierde: sigue en
+     /etc/letsencrypt/live y certbot lo reutiliza."
+fi
+
 if [[ -f "$NGINX_CONF" ]] && grep -q 'ssl_certificate' "$NGINX_CONF"; then
   warn "$NGINX_CONF ya tiene el HTTPS que agregó certbot: NO se toca."
   warn "Los snippets sí se actualizaron (incluida la lista de redes del admin)."

@@ -201,7 +201,7 @@ export function Acuerdos({ api }: { api: ApiClient }) {
 
       <div className="card">
         <h2>Cómo se resuelve</h2>
-        <p className="hint" style={{ marginTop: -6 }}>
+        <p className="hint">
           De más específico a más general. El primero que exista, gana:
         </p>
         <ol style={{ margin: "10px 0 0", paddingLeft: 20, lineHeight: 2 }}>

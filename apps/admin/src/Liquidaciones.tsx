@@ -118,7 +118,7 @@ export function Liquidaciones({ api }: { api: ApiClient }) {
                 ))}
               </tbody>
               <tfoot>
-                <tr style={{ borderTop: "2px solid var(--border)" }}>
+                <tr>
                   <td><strong>Total</strong></td>
                   <td className="num"><strong>{total.ordenes}</strong></td>
                   <td className="num"><strong>{money(total.bruto)}</strong></td>

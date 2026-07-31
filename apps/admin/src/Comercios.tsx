@@ -281,13 +281,13 @@ export function Comercios({ api }: { api: ApiClient }) {
               />
             </label>
 
-            <label style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+            <label className="flex items-start gap-2">
               <input
                 type="checkbox" checked={form.absorbsInstallmentCost}
                 onChange={(e) => setForm({ ...form, absorbsInstallmentCost: e.target.checked })}
                 style={{ marginTop: 3 }}
               />
-              <span style={{ margin: 0, fontWeight: 400, color: "var(--text)" }}>
+              <span className="!m-0 !normal-case !tracking-normal !text-sm !font-normal !text-slate-700">
                 El comercio absorbe el costo de las cuotas sin interés
                 <div className="hint">
                   Si se destilda, ese costo lo pone el banco y al comercio se le liquida el bruto

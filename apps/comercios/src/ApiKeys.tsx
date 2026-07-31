@@ -114,20 +114,20 @@ export function ApiKeys({ api }: { api: ApiClient }) {
 
       <div className="card">
         <h2>Cómo usarla</h2>
-        <p className="hint" style={{ marginTop: -6 }}>
+        <p className="hint">
           Todas las llamadas van con el header <code>X-API-Key</code>. El comercio sale de la
           clave, así que nunca hay que mandarlo.
         </p>
 
         <h3 style={{ marginTop: 16 }}>Probar la clave</h3>
-        <pre style={{ background: "var(--bg)", padding: 12, borderRadius: 6, overflowX: "auto", fontSize: 12 }}>
+        <pre>
 {`curl ${base}/api/v1/ping \\
   -H "X-API-Key: TU_CLAVE"`}
         </pre>
         <p className="hint">Devuelve tu comercio y qué categorías tenés habilitadas.</p>
 
         <h3 style={{ marginTop: 16 }}>Sincronizar catálogo</h3>
-        <pre style={{ background: "var(--bg)", padding: 12, borderRadius: 6, overflowX: "auto", fontSize: 12 }}>
+        <pre>
 {`curl -X PUT ${base}/api/v1/products \\
   -H "X-API-Key: TU_CLAVE" \\
   -H "Content-Type: application/json" \\
@@ -143,7 +143,7 @@ export function ApiKeys({ api }: { api: ApiClient }) {
         </p>
 
         <h3 style={{ marginTop: 16 }}>Actualizar sólo stock</h3>
-        <pre style={{ background: "var(--bg)", padding: 12, borderRadius: 6, overflowX: "auto", fontSize: 12 }}>
+        <pre>
 {`curl -X PATCH ${base}/api/v1/stock \\
   -H "X-API-Key: TU_CLAVE" \\
   -H "Content-Type: application/json" \\
@@ -152,7 +152,7 @@ export function ApiKeys({ api }: { api: ApiClient }) {
         <p className="hint">Más liviano que mandar el producto entero: es el que conviene correr seguido.</p>
 
         <h3 style={{ marginTop: 16 }}>Traer tus ventas</h3>
-        <pre style={{ background: "var(--bg)", padding: 12, borderRadius: 6, overflowX: "auto", fontSize: 12 }}>
+        <pre>
 {`curl "${base}/api/v1/orders?status=pending" \\
   -H "X-API-Key: TU_CLAVE"`}
         </pre>
@@ -174,7 +174,7 @@ export function ApiKeys({ api }: { api: ApiClient }) {
             <label>
               <span>Permisos</span>
               {SCOPES.map((s) => (
-                <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                <label key={s.id} className="flex items-center gap-2 !mb-1.5">
                   <input
                     type="checkbox"
                     checked={scopes.includes(s.id)}
@@ -183,7 +183,7 @@ export function ApiKeys({ api }: { api: ApiClient }) {
                         e.target.checked ? [...prev, s.id] : prev.filter((x) => x !== s.id))
                     }
                   />
-                  <span style={{ margin: 0, fontWeight: 400, color: "var(--text)" }}>{s.label}</span>
+                  <span className="!m-0 !normal-case !tracking-normal !text-sm !font-normal !text-slate-700">{s.label}</span>
                 </label>
               ))}
             </label>

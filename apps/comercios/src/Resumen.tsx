@@ -79,7 +79,7 @@ export function Resumen({ api }: { api: ApiClient }) {
 
       <div className="card" style={{ marginTop: 16 }}>
         <h2>Tus condiciones</h2>
-        <p className="hint" style={{ marginTop: -6, marginBottom: 12 }}>
+        <p className="hint">
           Las fija la plataforma. Si algo no coincide con lo acordado, hablá con tu contacto comercial.
         </p>
         <div className="table-wrap">
@@ -116,7 +116,7 @@ export function Resumen({ api }: { api: ApiClient }) {
 
       <div className="card">
         <h2>Beneficios bancarios que te aplican</h2>
-        <p className="hint" style={{ marginTop: -6, marginBottom: 12 }}>
+        <p className="hint">
           Cuando hay más de uno para la misma compra, gana el más específico: un acuerdo
           exclusivo tuyo reemplaza al general del banco.
         </p>

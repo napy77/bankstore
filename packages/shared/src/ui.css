@@ -1,218 +1,193 @@
+@import "tailwindcss";
+
 /*
- * Base de UI para los paneles internos (comercios y admin).
+ * Estilos de los paneles internos (comercios y admin).
  *
- * No usan Tailwind como la tienda: son herramientas de trabajo, con tablas y
- * formularios densos, y para eso un CSS chico y explícito rinde más que
- * arrastrar utilidades por todo el markup. La tienda sigue con Tailwind
- * porque ahí manda el diseño.
+ * Usan los MISMOS tokens que la tienda —azul 600/900 sobre slate, rounded-xl,
+ * micro-etiquetas en mayúscula— para que los tres sitios se lean como el mismo
+ * producto. El comercio entra a su panel desde la misma marca que ve el
+ * comprador.
+ *
+ * Va con @apply y no con utilidades sueltas en el markup porque los paneles son
+ * tablas y formularios densos: una fila con quince clases por celda es
+ * ilegible y se desincroniza entre pantallas. Los tokens siguen siendo los de
+ * Tailwind, así que el lenguaje visual es exactamente el mismo.
  */
 
-:root {
-  --bg: #f5f6f8;
-  --surface: #ffffff;
-  --border: #e2e5ea;
-  --text: #1a1f2b;
-  --text-muted: #667085;
-  --primary: #1c3faa;
-  --primary-hover: #16328a;
-  --primary-soft: #eef2ff;
-  --danger: #b42318;
-  --danger-soft: #fef3f2;
-  --success: #067647;
-  --success-soft: #ecfdf3;
-  --warning: #b54708;
-  --warning-soft: #fffaeb;
-  --radius: 8px;
-  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+/* Tailwind no escanea node_modules, y los paneles importan sus componentes
+   desde el paquete compartido: sin esto, esas clases no se generan. */
+@source "../../../apps";
+@source "./";
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 font-sans antialiased
+           selection:bg-blue-100 selection:text-blue-900;
+  }
 }
 
-* { box-sizing: border-box; }
+@layer components {
 
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  -webkit-font-smoothing: antialiased;
-}
+  /* ── Layout ───────────────────────────────────────────────────────────── */
 
-h1 { font-size: 22px; margin: 0 0 4px; }
-h2 { font-size: 17px; margin: 0 0 12px; }
-h3 { font-size: 15px; margin: 0 0 8px; }
+  .app { @apply min-h-screen flex flex-col lg:flex-row; }
 
-a { color: var(--primary); }
+  .sidebar {
+    @apply w-full lg:w-60 shrink-0 bg-white border-b lg:border-b-0 lg:border-r
+           border-slate-200 flex flex-col px-3 py-4 lg:py-6 lg:sticky lg:top-0
+           lg:h-screen shadow-sm;
+  }
 
-/* ── Layout ─────────────────────────────────────────────────────────────── */
+  .nav { @apply flex lg:flex-col gap-1 flex-1 overflow-x-auto lg:overflow-visible; }
 
-.app { display: flex; min-height: 100vh; }
+  .nav button {
+    @apply text-left whitespace-nowrap px-3.5 py-2.5 rounded-xl text-sm
+           font-medium text-slate-500 transition-colors
+           hover:bg-slate-100 hover:text-slate-800 cursor-pointer;
+  }
+  .nav button[aria-current="true"] {
+    @apply bg-blue-600 text-white font-bold shadow-md shadow-blue-600/15
+           hover:bg-blue-700 hover:text-white;
+  }
 
-.sidebar {
-  width: 220px;
-  flex-shrink: 0;
-  background: var(--surface);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  padding: 20px 12px;
-}
+  .session { @apply hidden lg:block border-t border-slate-200 pt-4 mt-4; }
+  .session .who { @apply px-2 pb-3; }
+  .session .who strong { @apply block text-sm font-bold text-slate-800 truncate; }
+  .session .who span { @apply block text-xs text-slate-400 truncate; }
 
-.brand { padding: 0 10px 20px; }
-.brand strong { display: block; font-size: 16px; letter-spacing: -0.01em; }
-.brand span { color: var(--text-muted); font-size: 12px; }
+  .main { @apply flex-1 min-w-0 px-4 py-6 lg:px-8 lg:py-8 max-w-[1500px]; }
 
-.nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
-.nav button {
-  display: block; width: 100%; text-align: left;
-  padding: 9px 10px; border: 0; border-radius: 6px;
-  background: transparent; color: var(--text-muted);
-  font: inherit; cursor: pointer;
-}
-.nav button:hover { background: var(--bg); color: var(--text); }
-.nav button[aria-current="true"] {
-  background: var(--primary-soft); color: var(--primary); font-weight: 600;
-}
+  .page-head {
+    @apply flex items-start justify-between gap-4 flex-wrap mb-6;
+  }
+  .page-head h1 {
+    @apply text-2xl font-bold tracking-tight text-slate-800;
+  }
+  .page-head p { @apply text-sm text-slate-500 mt-1 max-w-2xl; }
 
-.session { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
-.session .who { padding: 0 10px 8px; }
-.session .who strong { display: block; font-size: 13px; }
-.session .who span { color: var(--text-muted); font-size: 12px; }
+  /* ── Superficies ──────────────────────────────────────────────────────── */
 
-.main { flex: 1; padding: 28px 32px; max-width: 1400px; min-width: 0; }
-.page-head {
-  display: flex; align-items: flex-start; justify-content: space-between;
-  gap: 16px; margin-bottom: 20px; flex-wrap: wrap;
-}
-.page-head p { margin: 0; color: var(--text-muted); }
+  .card {
+    @apply bg-white border border-slate-200/60 rounded-2xl shadow-sm p-5;
+  }
+  .card + .card { @apply mt-4; }
+  .card h2 { @apply text-base font-bold text-slate-800 mb-3; }
+  .card h3 { @apply text-sm font-bold text-slate-700 mb-2; }
 
-/* ── Superficies ────────────────────────────────────────────────────────── */
+  .grid { @apply grid gap-4; }
+  .grid.cols-2 { @apply grid-cols-1 md:grid-cols-2; }
+  .grid.cols-3 { @apply grid-cols-1 sm:grid-cols-2 lg:grid-cols-3; }
+  .grid.cols-4 { @apply grid-cols-2 lg:grid-cols-4; }
 
-.card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: 18px;
-}
-.card + .card { margin-top: 16px; }
+  /* La micro-etiqueta en mayúscula es la firma tipográfica de la tienda. */
+  .stat .label {
+    @apply text-[10px] font-bold uppercase tracking-wider text-slate-400;
+  }
+  .stat .value { @apply text-2xl font-extrabold text-blue-900 mt-1 tabular-nums; }
+  .stat .hint { @apply text-xs text-slate-500 mt-0.5; }
 
-.grid { display: grid; gap: 16px; }
-.grid.cols-2 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
-.grid.cols-3 { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
-.grid.cols-4 { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+  /* ── Tablas ───────────────────────────────────────────────────────────── */
 
-.stat .label {
-  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
-  color: var(--text-muted); font-weight: 600;
-}
-.stat .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
-.stat .hint { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .table-wrap { @apply overflow-x-auto -mx-5 px-5; }
+  table { @apply w-full min-w-[720px] border-collapse text-sm; }
+  th {
+    @apply text-left px-3 py-2.5 text-[10px] font-bold uppercase tracking-wider
+           text-slate-400 whitespace-nowrap border-b border-slate-200;
+  }
+  td { @apply px-3 py-3 border-b border-slate-100 text-slate-600 align-top; }
+  td strong { @apply text-slate-800 font-bold; }
+  td.num, th.num { @apply text-right tabular-nums; }
+  tbody tr:last-child td { @apply border-b-0; }
+  tbody tr { @apply transition-colors; }
+  tbody tr:hover { @apply bg-slate-50/70; }
+  tfoot td { @apply border-t-2 border-slate-200 text-slate-800 font-bold; }
 
-/* ── Tablas ─────────────────────────────────────────────────────────────── */
+  .empty { @apply py-12 text-center text-sm text-slate-400; }
 
-.table-wrap { overflow-x: auto; }
-/*
- * min-width fuerza el scroll horizontal en lugar de dejar que el navegador
- * comprima las columnas hasta romper el texto carácter por carácter. En
- * pantallas anchas no se nota; en angostas, la tabla se desliza.
- */
-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; }
-th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
-th {
-  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
-  color: var(--text-muted); font-weight: 600; white-space: nowrap;
-}
-td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-tbody tr:last-child td { border-bottom: 0; }
-tbody tr:hover { background: var(--bg); }
+  /* ── Controles ────────────────────────────────────────────────────────── */
 
-.empty { padding: 36px; text-align: center; color: var(--text-muted); }
+  label { @apply block mb-3.5; }
+  label > span {
+    @apply block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5;
+  }
+  label > span .req { @apply text-rose-600; }
 
-/* ── Controles ──────────────────────────────────────────────────────────── */
+  input, select, textarea {
+    @apply w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-sm
+           text-slate-800 placeholder:text-slate-300 transition-shadow
+           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500;
+  }
+  input[type="checkbox"] {
+    @apply w-4 h-4 accent-blue-600 rounded cursor-pointer;
+  }
+  textarea { @apply min-h-20 resize-y; }
+  .hint { @apply text-xs text-slate-400 mt-1 leading-snug; }
 
-label { display: block; margin-bottom: 12px; }
-label > span {
-  display: block; font-size: 12px; font-weight: 600;
-  color: var(--text-muted); margin-bottom: 4px;
-}
-label > span .req { color: var(--danger); }
+  button {
+    @apply px-4 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply bg-blue-600 text-white shadow-md shadow-blue-600/10
+           hover:bg-blue-700 disabled:hover:bg-blue-600;
+  }
+  .btn-ghost {
+    @apply bg-white text-slate-600 border border-slate-200
+           hover:bg-slate-50 hover:text-slate-800;
+  }
+  .btn-danger {
+    @apply bg-rose-50 text-rose-600 border border-rose-100 hover:bg-rose-100;
+  }
+  .btn-sm { @apply px-2.5 py-1.5 text-xs rounded-lg; }
+  .row { @apply flex flex-wrap items-center gap-2; }
 
-input, select, textarea {
-  width: 100%; padding: 8px 10px;
-  border: 1px solid var(--border); border-radius: 6px;
-  background: var(--surface); color: var(--text); font: inherit;
-}
-input:focus, select:focus, textarea:focus {
-  outline: 2px solid var(--primary); outline-offset: -1px; border-color: var(--primary);
-}
-input[type="checkbox"] { width: auto; margin-right: 6px; }
-textarea { min-height: 72px; resize: vertical; }
-.hint { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+  /* ── Estados ──────────────────────────────────────────────────────────── */
 
-button {
-  padding: 8px 14px; border-radius: 6px; border: 1px solid transparent;
-  font: inherit; font-weight: 500; cursor: pointer;
-}
-button:disabled { opacity: 0.55; cursor: not-allowed; }
-.btn-primary { background: var(--primary); color: #fff; }
-.btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
-.btn-ghost { background: var(--surface); border-color: var(--border); color: var(--text); }
-.btn-ghost:hover:not(:disabled) { background: var(--bg); }
-.btn-danger { background: var(--danger-soft); color: var(--danger); border-color: #fecdc9; }
-.btn-sm { padding: 5px 10px; font-size: 12px; }
-.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .badge {
+    @apply inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold
+           uppercase tracking-wider whitespace-nowrap;
+  }
+  .badge.neutral { @apply bg-slate-100 text-slate-500; }
+  .badge.success { @apply bg-emerald-50 text-emerald-700; }
+  .badge.warning { @apply bg-amber-50 text-amber-700; }
+  .badge.danger  { @apply bg-rose-50 text-rose-600; }
+  .badge.info    { @apply bg-blue-50 text-blue-700; }
 
-/* ── Estados ────────────────────────────────────────────────────────────── */
+  .alert { @apply rounded-2xl px-4 py-3 text-sm mb-4 border; }
+  .alert.error { @apply bg-rose-50 border-rose-100 text-rose-700; }
+  .alert.ok    { @apply bg-emerald-50 border-emerald-100 text-emerald-700; }
+  .alert.warn  { @apply bg-amber-50 border-amber-100 text-amber-800; }
 
-.badge {
-  display: inline-block; padding: 2px 8px; border-radius: 999px;
-  font-size: 11px; font-weight: 600; white-space: nowrap;
-}
-.badge.neutral { background: var(--bg); color: var(--text-muted); }
-.badge.success { background: var(--success-soft); color: var(--success); }
-.badge.warning { background: var(--warning-soft); color: var(--warning); }
-.badge.danger  { background: var(--danger-soft); color: var(--danger); }
-.badge.info    { background: var(--primary-soft); color: var(--primary); }
+  /* ── Login ────────────────────────────────────────────────────────────── */
 
-.alert { padding: 12px 14px; border-radius: var(--radius); margin-bottom: 16px; font-size: 13px; }
-.alert.error { background: var(--danger-soft); color: var(--danger); }
-.alert.ok { background: var(--success-soft); color: var(--success); }
-.alert.warn { background: var(--warning-soft); color: var(--warning); }
+  .login-screen {
+    @apply min-h-screen grid place-items-center p-5
+           bg-gradient-to-br from-slate-50 via-slate-50 to-blue-50;
+  }
+  .login-box { @apply w-full max-w-sm; }
 
-/* ── Login ──────────────────────────────────────────────────────────────── */
+  /* ── Modal ────────────────────────────────────────────────────────────── */
 
-.login-screen {
-  min-height: 100vh; display: grid; place-items: center; padding: 20px;
-}
-.login-box { width: 100%; max-width: 380px; }
-.login-box .brand { text-align: center; padding-bottom: 24px; }
+  .modal-backdrop {
+    @apply fixed inset-0 z-50 grid place-items-center p-5
+           bg-slate-900/45 backdrop-blur-sm;
+  }
+  .modal {
+    @apply w-full max-w-xl max-h-[88vh] overflow-y-auto
+           bg-white rounded-2xl shadow-2xl p-6;
+  }
+  .modal h2 { @apply text-lg font-bold text-slate-800 mb-4; }
 
-/* ── Modal ──────────────────────────────────────────────────────────────── */
+  code {
+    @apply bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded-md
+           font-mono text-xs whitespace-nowrap;
+  }
+  /* Sólo las claves de API se parten: son largas y no tienen dónde cortar. */
+  .modal code, code.wrap { @apply whitespace-normal break-all; }
 
-.modal-backdrop {
-  position: fixed; inset: 0; background: rgba(16, 24, 40, 0.45);
-  display: grid; place-items: center; padding: 20px; z-index: 50;
-}
-.modal {
-  background: var(--surface); border-radius: var(--radius);
-  width: 100%; max-width: 560px; max-height: 88vh; overflow-y: auto; padding: 22px;
-}
-.modal h2 { margin-bottom: 16px; }
-
-code {
-  background: var(--bg); padding: 2px 6px; border-radius: 4px;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
-  white-space: nowrap;
-}
-/*
- * Sólo las claves de API se parten: son largas y no tienen dónde cortar.
- * Un SKU corto partido carácter por carácter es ilegible, así que el default
- * es no romper nunca.
- */
-.modal code, code.wrap { white-space: normal; word-break: break-all; }
-
-@media (max-width: 780px) {
-  .app { flex-direction: column; }
-  .sidebar { width: 100%; border-right: 0; border-bottom: 1px solid var(--border); }
-  .nav { flex-direction: row; overflow-x: auto; }
-  .main { padding: 20px 16px; }
+  pre {
+    @apply bg-slate-900 text-slate-100 rounded-xl p-4 overflow-x-auto
+           text-xs leading-relaxed font-mono;
+  }
+  pre code { @apply bg-transparent text-inherit p-0; }
 }

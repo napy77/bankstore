@@ -4,9 +4,9 @@ Tres subdominios, un solo backend, una sola base.
 
 | Subdominio | Sirve | Acceso | Rutas de API que expone |
 | --- | --- | --- | --- |
-| `tienda.<dominio>` | `apps/tienda/dist` | Público | `/api/auth`, `/api/catalog`, `/api/cards`, `/api/orders` |
-| `comercios.<dominio>` | `apps/comercios/dist` | Público (con login) | `/api/staff`, `/api/merchant`, `/api/v1` |
-| `admin.<dominio>` | `apps/admin/dist` | **Sólo intranet** | `/api/staff`, `/api/admin`, `/api/catalog` |
+| `bankstore.nexopos.app` | `apps/tienda/dist` | Público | `/api/auth`, `/api/catalog`, `/api/cards`, `/api/orders` |
+| `comercios.bankstore.nexopos.app` | `apps/comercios/dist` | Público (con login) | `/api/staff`, `/api/merchant`, `/api/v1` |
+| `admin.bankstore.nexopos.app` | `apps/admin/dist` | **Sólo intranet** | `/api/staff`, `/api/admin`, `/api/catalog` |
 
 Cada uno proxea `/api` al mismo proceso en `127.0.0.1:4020`, pero **sólo las
 rutas de su columna**. Todo lo demás bajo `/api` devuelve 404.
@@ -48,6 +48,44 @@ sirve Nginx. Por eso ocupa un solo puerto pese a tener tres sitios.
 
 Lo único compartido entre las tres apps es Node (el del sistema, 20+), Nginx y
 PostgreSQL.
+
+## Migrar la instalación que ya está corriendo
+
+La VM hoy tiene Bankstore en un solo dominio, con el server block apuntando a
+`/opt/bankstore/dist`. Después de pasar a monorepo esa carpeta ya no existe:
+cada app compila a `apps/<app>/dist`. Hay que regenerar el server block.
+
+`setup-server.sh` **detecta este caso y frena** en vez de dejar la tienda en
+404. Los pasos:
+
+```bash
+sudo cp /opt/bankstore/deploy/bankstore.env.example /etc/bankstore-deploy.env
+```
+
+Revisá `ADMIN_ALLOWED_CIDRS` y `ADMIN_PASSWORD` antes de seguir:
+
+```bash
+sudo vi /etc/bankstore-deploy.env
+```
+
+```bash
+sudo rm /etc/nginx/sites-available/bankstore
+```
+
+```bash
+sudo bash /opt/bankstore/deploy/setup-server.sh
+```
+
+```bash
+sudo certbot --nginx -d bankstore.nexopos.app -d comercios.bankstore.nexopos.app -d admin.bankstore.nexopos.app --agree-tos -m germanyovan@gmail.com --redirect
+```
+
+Certbot **amplía el certificado que ya existe** para cubrir los tres nombres;
+no emite uno desde cero ni pierde el actual.
+
+```bash
+sudo bash /opt/bankstore/deploy/deploy.sh
+```
 
 ## Instalación desde cero
 

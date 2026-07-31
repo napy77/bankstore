@@ -1,7 +1,31 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { Landmark, LogOut } from "lucide-react";
 import { createApiClient, getToken, setToken, type ApiClient } from "./client.js";
 import type { StaffUser } from "./types.js";
 import { ErrorBanner } from "./ui.js";
+
+/**
+ * La marca, igual que en la tienda: ícono en cuadrado azul, BANK en bold sobre
+ * STORE en light, y el bajada en versalitas. Se repite acá a propósito — que el
+ * comercio entre a su panel desde la misma marca que ve el comprador es parte
+ * de que los tres sitios se sientan un solo producto.
+ */
+export function Brand({ subtitle, center }: { subtitle: string; center?: boolean }) {
+  return (
+    <div className={`flex items-center gap-3 ${center ? "justify-center" : ""}`}>
+      <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center shrink-0">
+        <Landmark className="text-white" size={20} strokeWidth={2.5} />
+      </div>
+      <div className="leading-none min-w-0">
+        <span className="text-xl font-bold tracking-tight text-blue-900">BANK</span>
+        <span className="text-xl font-light text-blue-600">STORE</span>
+        <span className="text-[9px] block text-slate-400 font-bold uppercase tracking-widest mt-0.5 truncate">
+          {subtitle}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 /**
  * Sesión de back-office, compartida por los dos paneles.
@@ -94,9 +118,8 @@ export function LoginScreen({
   return (
     <div className="login-screen">
       <div className="login-box">
-        <div className="brand">
-          <strong>{title}</strong>
-          <span>{subtitle}</span>
+        <div className="mb-6">
+          <Brand subtitle={subtitle} center />
         </div>
         <div className="card">
           <ErrorBanner error={error} />
@@ -117,7 +140,7 @@ export function LoginScreen({
                 onChange={(e) => setPassword(e.target.value)}
               />
             </label>
-            <button type="submit" className="btn-primary" disabled={busy} style={{ width: "100%" }}>
+            <button type="submit" className="btn-primary w-full py-2.5" disabled={busy}>
               {busy ? "Entrando…" : "Entrar"}
             </button>
           </form>
@@ -128,9 +151,10 @@ export function LoginScreen({
 }
 
 export function Shell({
-  title, subtitle, user, sections, current, onNavigate, onLogout, children,
+  subtitle, user, sections, current, onNavigate, onLogout, children,
 }: {
-  title: string;
+  /** Sólo para compatibilidad de llamada; la marca es siempre BANKSTORE. */
+  title?: string;
   subtitle: string;
   user: StaffUser;
   sections: { id: string; label: string }[];
@@ -142,10 +166,18 @@ export function Shell({
   return (
     <div className="app">
       <aside className="sidebar">
-        <div className="brand">
-          <strong>{title}</strong>
-          <span>{subtitle}</span>
+        <div className="px-2 pb-5 hidden lg:block">
+          <Brand subtitle={subtitle} />
         </div>
+
+        {/* En mobile la marca va compacta arriba de la barra de secciones */}
+        <div className="flex items-center justify-between gap-3 pb-3 lg:hidden">
+          <Brand subtitle={subtitle} />
+          <button className="btn-ghost btn-sm shrink-0" onClick={onLogout} title="Cerrar sesión">
+            <LogOut size={14} />
+          </button>
+        </div>
+
         <nav className="nav">
           {sections.map((s) => (
             <button
@@ -157,12 +189,17 @@ export function Shell({
             </button>
           ))}
         </nav>
+
         <div className="session">
           <div className="who">
             <strong>{user.name}</strong>
             <span>{user.email}</span>
           </div>
-          <button className="btn-ghost btn-sm" style={{ width: "100%" }} onClick={onLogout}>
+          <button
+            className="btn-ghost btn-sm w-full flex items-center justify-center gap-1.5"
+            onClick={onLogout}
+          >
+            <LogOut size={13} />
             Cerrar sesión
           </button>
         </div>

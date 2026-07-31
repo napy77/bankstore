@@ -179,7 +179,7 @@ export function Usuarios({ api }: { api: ApiClient }) {
                 <option value="platform_admin">Administrador de plataforma</option>
               </select>
               {esPlataforma && (
-                <div className="hint" style={{ color: "var(--danger)" }}>
+                <div className="hint !text-rose-600">
                   Con este rol puede dar de alta cualquier comercio y cambiar cualquier condición
                   comercial. Dalo sólo si hace falta.
                 </div>
