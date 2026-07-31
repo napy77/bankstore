@@ -154,6 +154,10 @@ if [[ "${SEED_DEMO_DATA:-false}" == "true" ]]; then
   #
   # Las API keys sólo se generan la primera vez: el secreto no se puede
   # recuperar, así que regenerarlas rompería integraciones ya configuradas.
+  # Marcas y árbol de categorías: son estructura compartida, van primero.
+  run npm run seed:catalogo --workspace bankstore-backend ||
+    warn "El seed de marcas y categorías falló."
+
   ADMIN_EMAIL="${ADMIN_EMAIL:-admin@bankstore.test}" \
   ADMIN_PASSWORD="${ADMIN_PASSWORD:-bankstore-admin-2026}" \
   MERCHANT_PASSWORD="${MERCHANT_PASSWORD:-comercio-2026-demo}" \
