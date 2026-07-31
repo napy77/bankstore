@@ -35,16 +35,19 @@ if [[ ! -f "$CONFIG" ]]; then
      Copialo del repo y completalo:
        cp $HERE/bankstore.env.example $CONFIG
        chmod 600 $CONFIG
-       nano $CONFIG"
+       vi $CONFIG"
 fi
 # shellcheck disable=SC1090
 source "$CONFIG"
 
-for var in DOMAIN APP_DIR REPO_URL BRANCH APP_USER API_PORT DB_NAME DB_USER; do
+for var in STORE_DOMAIN MERCHANT_DOMAIN ADMIN_DOMAIN ADMIN_ALLOWED_CIDRS \
+           APP_DIR REPO_URL BRANCH APP_USER API_PORT DB_NAME DB_USER; do
   [[ -n "${!var:-}" ]] || die "Falta $var en $CONFIG"
 done
-ok "Sitio: https://$DOMAIN  (/ estáticos · /api → 127.0.0.1:$API_PORT)"
-ok "Carpeta: $APP_DIR · base: $DB_NAME"
+ok "Tienda     : https://$STORE_DOMAIN"
+ok "Comercios  : https://$MERCHANT_DOMAIN"
+ok "Admin      : https://$ADMIN_DOMAIN  (sólo desde $ADMIN_ALLOWED_CIDRS)"
+ok "API interna: 127.0.0.1:$API_PORT · carpeta $APP_DIR · base $DB_NAME"
 
 say "Verificando herramientas"
 for cmd in git node npm nginx psql; do
@@ -160,7 +163,7 @@ if [[ -f "$BACKEND_ENV" ]]; then
   set_env_var "$BACKEND_ENV" HOST "127.0.0.1"
   set_env_var "$BACKEND_ENV" DATABASE_URL \
     "postgres://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME"
-  set_env_var "$BACKEND_ENV" PUBLIC_URL "https://$DOMAIN"
+  set_env_var "$BACKEND_ENV" PUBLIC_URL "https://$STORE_DOMAIN"
   set_env_var "$BACKEND_ENV" TNA_DEFAULT "${TNA_DEFAULT:-0.42}"
   set_env_var "$BACKEND_ENV" IVA_INTERESES "${IVA_INTERESES:-0.21}"
   ok "puerto, URL y tasas sincronizados con $CONFIG"
@@ -175,7 +178,7 @@ PORT=$API_PORT
 HOST=127.0.0.1
 DATABASE_URL=postgres://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME
 JWT_SECRET=$JWT_SECRET
-PUBLIC_URL=https://$DOMAIN
+PUBLIC_URL=https://$STORE_DOMAIN
 
 # Parámetros financieros (ver deploy/README.md)
 TNA_DEFAULT=${TNA_DEFAULT:-0.42}
@@ -189,25 +192,53 @@ chmod 600 "$BACKEND_ENV"
 # ─── 6. Nginx y systemd ──────────────────────────────────────────────────────
 say "Nginx"
 render() {
-  sed -e "s|__DOMAIN__|$DOMAIN|g" \
+  sed -e "s|__STORE_DOMAIN__|$STORE_DOMAIN|g" \
+      -e "s|__MERCHANT_DOMAIN__|$MERCHANT_DOMAIN|g" \
+      -e "s|__ADMIN_DOMAIN__|$ADMIN_DOMAIN|g" \
       -e "s|__API_PORT__|$API_PORT|g" \
       -e "s|__APP_DIR__|$APP_DIR|g" \
       -e "s|__APP_USER__|$APP_USER|g" \
       "$1"
 }
 
+mkdir -p /etc/nginx/snippets
+
+# Cabeceras del proxy y de seguridad, compartidas por los tres server blocks.
+render "$HERE/nginx/proxy.snippet.conf"    > /etc/nginx/snippets/bankstore-proxy.conf
+render "$HERE/nginx/security.snippet.conf" > /etc/nginx/snippets/bankstore-security.conf
+ok "snippets de proxy y seguridad instalados"
+
+# Lista de redes que pueden entrar a la administración. Se regenera siempre,
+# incluso cuando el server block ya está congelado por certbot: es lo único que
+# uno necesita cambiar seguido (cambió la VPN, se sumó una oficina) y no
+# debería obligar a rehacer los certificados.
+{
+  echo "# Generado por deploy/setup-server.sh — $(date -Iseconds)"
+  echo "# Redes con acceso a $ADMIN_DOMAIN. Se edita ADMIN_ALLOWED_CIDRS en"
+  echo "# $CONFIG y se vuelve a correr el setup."
+  for cidr in $ADMIN_ALLOWED_CIDRS; do
+    echo "allow $cidr;"
+  done
+  echo "deny all;"
+} > /etc/nginx/snippets/bankstore-admin-allow.conf
+ok "acceso a la administración limitado a: $ADMIN_ALLOWED_CIDRS"
+
+# Certbot necesita escribir el challenge acá
+mkdir -p /var/www/html
+
 NGINX_CONF=/etc/nginx/sites-available/bankstore
 
-# Certbot ESCRIBE sobre este archivo: le agrega el bloque 443 con los
-# certificados y el redirect. Regenerarlo desde la plantilla lo borraría y el
-# sitio volvería a HTTP, con Nginx respondiendo el certificado de otro vhost
-# ("no alternative certificate subject name matches").
+# Certbot ESCRIBE sobre este archivo: le agrega los bloques 443 con los
+# certificados y los redirects. Regenerarlo desde la plantilla los borraría y
+# los sitios volverían a HTTP, con Nginx respondiendo el certificado de otro
+# vhost ("no alternative certificate subject name matches").
 if [[ -f "$NGINX_CONF" ]] && grep -q 'ssl_certificate' "$NGINX_CONF"; then
   warn "$NGINX_CONF ya tiene el HTTPS que agregó certbot: NO se toca."
-  warn "Si de verdad necesitás regenerarlo (cambiaste el dominio o el puerto):"
+  warn "Los snippets sí se actualizaron (incluida la lista de redes del admin)."
+  warn "Si necesitás regenerar los server blocks (cambiaste un dominio o el puerto):"
   warn "    sudo rm $NGINX_CONF"
   warn "    sudo bash $HERE/setup-server.sh"
-  warn "    sudo certbot --nginx -d $DOMAIN --redirect"
+  warn "    sudo certbot --nginx -d $STORE_DOMAIN -d $MERCHANT_DOMAIN -d $ADMIN_DOMAIN --redirect"
   nginx -t || die "La configuración de Nginx no valida."
 else
   # En un servidor sin IPv6, `listen [::]:80` hace fallar TODO Nginx —incluido
@@ -219,26 +250,44 @@ else
     warn "este servidor no tiene IPv6: se omite el listen [::]:80"
     render "$HERE/nginx/bankstore.conf.template" | grep -v 'listen \[::\]' > "$NGINX_CONF"
   fi
+
+  # Redirect del dominio anterior, para no dejar links rotos.
+  if [[ -n "${LEGACY_DOMAIN:-}" ]]; then
+    cat >> "$NGINX_CONF" <<EOF
+
+# ── Dominio anterior → tienda ────────────────────────────────────────────────
+server {
+    listen 80;
+    server_name $LEGACY_DOMAIN;
+    location ^~ /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$STORE_DOMAIN\$request_uri; }
+}
+EOF
+    ok "$LEGACY_DOMAIN redirige a $STORE_DOMAIN"
+  fi
+
   ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/bankstore
 
-  # Nginx no arranca si el root no existe todavía (el primer deploy aún no
-  # corrió). Se crea vacío con un placeholder para que `nginx -t` pase.
-  if [[ ! -d "$APP_DIR/dist" ]]; then
-    sudo -u "$APP_USER" mkdir -p "$APP_DIR/dist"
-    echo '<!doctype html><title>Bankstore</title><p>Falta correr deploy.sh</p>' \
-      > "$APP_DIR/dist/index.html"
-    chown "$APP_USER:$APP_USER" "$APP_DIR/dist/index.html"
-    ok "dist/ provisorio creado (deploy.sh lo reemplaza con el build real)"
-  fi
+  # Nginx no arranca si un root no existe todavía (el primer deploy aún no
+  # corrió). Se crean vacíos con un placeholder para que `nginx -t` pase.
+  for app in tienda comercios admin; do
+    if [[ ! -d "$APP_DIR/apps/$app/dist" ]]; then
+      mkdir -p "$APP_DIR/apps/$app/dist"
+      echo "<!doctype html><title>Bankstore</title><p>Falta correr deploy.sh</p>" \
+        > "$APP_DIR/apps/$app/dist/index.html"
+      chown -R "$APP_USER:$APP_USER" "$APP_DIR/apps/$app/dist"
+    fi
+  done
+  ok "carpetas dist/ provisorias creadas (deploy.sh las reemplaza)"
 
   nginx -t || die "La configuración de Nginx no valida. No recargué nada: lo que está sirviendo hoy sigue intacto."
   systemctl reload nginx
-  ok "server block instalado y Nginx recargado"
+  ok "los tres server blocks instalados y Nginx recargado"
 fi
 
-# Nginx corre como www-data y tiene que poder leer dist/. Los directorios del
-# camino necesitan +x para atravesarlos.
-chmod o+x "$APP_DIR" 2>/dev/null || true
+# Nginx corre como www-data y tiene que poder leer los dist/. Los directorios
+# del camino necesitan +x para atravesarlos.
+chmod o+x "$APP_DIR" "$APP_DIR/apps" 2>/dev/null || true
 
 say "Servicio systemd"
 render "$HERE/systemd/bankstore-api.service.template" > /etc/systemd/system/bankstore-api.service
@@ -253,18 +302,37 @@ cat <<EOF
 │  Servidor preparado. Faltan 3 pasos:                                       │
 └────────────────────────────────────────────────────────────────────────────┘
 
-  1. DNS — que $DOMAIN apunte (registro A) a la IP de este
-     servidor. Verificalo con:
+  1. DNS — que los TRES subdominios apunten (registro A) a este servidor.
+     El de admin también: Let's Encrypt valida por HTTP desde internet aunque
+     después el sitio quede restringido a la intranet.
 
-       dig +short $DOMAIN
+       dig +short $STORE_DOMAIN
+       dig +short $MERCHANT_DOMAIN
+       dig +short $ADMIN_DOMAIN
 
-  2. Certificado HTTPS — recién cuando el DNS resuelva:
+  2. Certificados HTTPS — recién cuando el DNS resuelva. Los tres en una sola
+     corrida, así comparten renovación:
 
-       sudo certbot --nginx -d $DOMAIN \\
+       sudo certbot --nginx \\
+         -d $STORE_DOMAIN \\
+         -d $MERCHANT_DOMAIN \\
+         -d $ADMIN_DOMAIN \\${LEGACY_DOMAIN:+
+         -d $LEGACY_DOMAIN \\}
          --agree-tos -m ${CERTBOT_EMAIL:-tu@email.com} --redirect
 
   3. Desplegar:
 
        sudo bash $APP_DIR/deploy/deploy.sh
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│  Después del deploy                                                        │
+└────────────────────────────────────────────────────────────────────────────┘
+
+  Tienda      https://$STORE_DOMAIN          pública
+  Comercios   https://$MERCHANT_DOMAIN       pública (login)
+  Admin       https://$ADMIN_DOMAIN          sólo desde $ADMIN_ALLOWED_CIDRS
+
+  Comprobá que la restricción del admin funciona desde afuera de la red:
+  tiene que dar 403.
 
 EOF

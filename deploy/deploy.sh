@@ -29,12 +29,12 @@ setup_primero() {
 
      Todavía no corriste la instalación. El orden es:
 
-       1. DNS del dominio apuntando a este servidor
+       1. DNS de los TRES subdominios apuntando a este servidor
        2. sudo git clone -b main https://github.com/napy77/bankstore.git /opt/bankstore
        3. sudo cp /opt/bankstore/deploy/bankstore.env.example /etc/bankstore-deploy.env
-          sudo nano /etc/bankstore-deploy.env
+          sudo vi /etc/bankstore-deploy.env
        4. sudo bash /opt/bankstore/deploy/setup-server.sh
-       5. sudo certbot --nginx -d <dominio> --redirect
+       5. sudo certbot --nginx -d tienda... -d comercios... -d admin... --redirect
        6. sudo bash /opt/bankstore/deploy/deploy.sh   ← recién acá
 
      Está todo detallado en deploy/README.md"
@@ -90,26 +90,32 @@ else
 fi
 
 # ─── 2. Backend ──────────────────────────────────────────────────────────────
-say "Backend: dependencias y build"
-# `npm ci` respeta el lockfile exacto. Se instalan también las devDependencies
-# porque TypeScript hace falta para compilar; después no molestan.
-run npm ci --prefix backend                 || die "Falló npm ci del backend"
-run npm run build --prefix backend          || die "Falló el build del backend"
+say "Dependencias"
+# Un solo `npm ci` en la raíz instala los cuatro workspaces (backend, las tres
+# apps y el paquete compartido) con el lockfile exacto. Se instalan también las
+# devDependencies porque TypeScript y Vite hacen falta para compilar.
+run npm ci                                  || die "Falló npm ci"
+ok "dependencias instaladas"
+
+say "Backend: build"
+run npm run build --workspace bankstore-backend || die "Falló el build del backend"
 ok "backend compilado en backend/dist"
 
 say "Migraciones"
 # El backend las corre solo al arrancar, pero acá se hace explícito para que,
 # si una migración falla, falle ANTES de reiniciar el servicio y no deje la
 # API caída en un loop de reinicios.
-run npm run migrate --prefix backend        || die "Falló una migración: NO reinicié la API"
+run npm run migrate --workspace bankstore-backend || die "Falló una migración: NO reinicié la API"
 ok "base al día"
 
 # ─── 3. Frontend ─────────────────────────────────────────────────────────────
-say "Frontend: dependencias y build"
-run npm ci                                  || die "Falló npm ci del frontend"
-run npm run build                           || die "Falló el build del frontend"
-[[ -f dist/index.html ]] || die "El build no generó dist/index.html"
-ok "frontend compilado en dist/ ($(du -sh dist | cut -f1))"
+say "Frontends: build de las tres apps"
+run npm run build                           || die "Falló el build de los frontends"
+for app in tienda comercios admin; do
+  [[ -f "apps/$app/dist/index.html" ]] ||
+    die "El build de $app no generó apps/$app/dist/index.html"
+  ok "$app → apps/$app/dist ($(du -sh "apps/$app/dist" | cut -f1))"
+done
 
 # ─── 4. Reiniciar la API ─────────────────────────────────────────────────────
 say "Reiniciando bankstore-api"
@@ -127,7 +133,7 @@ if [[ "${SEED_DEMO_DATA:-false}" == "true" ]]; then
   # órdenes ni los usuarios reales, sólo refresca catálogo y bancos.
   SEED_EMAIL="${SEED_EMAIL:-demo@bankstore.test}" \
   SEED_PASSWORD="${SEED_PASSWORD:-bankstore2026}" \
-    run npm run seed --prefix backend || warn "El seed del catálogo falló; el resto del deploy está bien."
+    run npm run seed --workspace bankstore-backend || warn "El seed del catálogo falló; el resto del deploy está bien."
 
   # Comercios, usuarios de back-office y acuerdos. Va aparte porque en una
   # instalación real el catálogo se carga distinto pero los comercios y el
@@ -138,7 +144,7 @@ if [[ "${SEED_DEMO_DATA:-false}" == "true" ]]; then
   ADMIN_EMAIL="${ADMIN_EMAIL:-admin@bankstore.test}" \
   ADMIN_PASSWORD="${ADMIN_PASSWORD:-bankstore-admin-2026}" \
   MERCHANT_PASSWORD="${MERCHANT_PASSWORD:-comercio-2026-demo}" \
-    run npm run seed:marketplace --prefix backend || warn "El seed de comercios falló."
+    run npm run seed:marketplace --workspace bankstore-backend || warn "El seed de comercios falló."
 else
   ok "SEED_DEMO_DATA no está en true: no se toca el catálogo"
 fi
@@ -167,16 +173,29 @@ else
   warn "El catálogo no responde: revisá la conexión a Postgres en backend/.env"
 fi
 
-if curl -fsS --max-time 5 -o /dev/null "https://$DOMAIN/"; then
-  ok "https://$DOMAIN sirve el frontend"
-else
-  warn "No pude verificar https://$DOMAIN desde el servidor."
-  warn "Si todavía no pediste el certificado:"
-  warn "    sudo certbot --nginx -d $DOMAIN --redirect"
-fi
+for d in "$STORE_DOMAIN" "$MERCHANT_DOMAIN"; do
+  if curl -fsS --max-time 5 -o /dev/null "https://$d/"; then
+    ok "https://$d responde"
+  else
+    warn "No pude verificar https://$d desde el servidor."
+    warn "Si todavía no pediste los certificados, mirá el final de setup-server.sh."
+  fi
+done
+
+# El admin se sirve sólo a la intranet. Desde el propio servidor entra si
+# 127.0.0.1 está en ADMIN_ALLOWED_CIDRS; si no, un 403 es la respuesta
+# CORRECTA y confirma que la restricción está puesta.
+admin_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "https://$ADMIN_DOMAIN/" || echo "000")
+case "$admin_code" in
+  200) ok "https://$ADMIN_DOMAIN responde (este servidor está en la lista permitida)" ;;
+  403) ok "https://$ADMIN_DOMAIN devuelve 403: la restricción de intranet está activa" ;;
+  *)   warn "https://$ADMIN_DOMAIN respondió $admin_code: revisá el certificado y el DNS" ;;
+esac
 
 say "Listo"
 echo "  commit desplegado: $(run git rev-parse --short HEAD)"
-echo "  sitio:             https://$DOMAIN"
+echo "  tienda:            https://$STORE_DOMAIN"
+echo "  comercios:         https://$MERCHANT_DOMAIN"
+echo "  admin:             https://$ADMIN_DOMAIN  (sólo intranet)"
 echo "  logs:              sudo journalctl -u bankstore-api -f"
 $ROLLBACK || echo "  volver atrás:      sudo bash $APP_DIR/deploy/deploy.sh --rollback"

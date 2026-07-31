@@ -16,11 +16,14 @@ import { integrationRouter } from "./modules/integration.js";
 
 const app = express();
 
-// En producción el frontend se sirve desde el mismo dominio que la API
-// (Nginx manda / a los estáticos y /api acá), así que no hay cross-origin.
-// CORS queda abierto sólo para el dev server de Vite, que sí está en otro
-// puerto.
-app.use(cors({ origin: [config.publicUrl, "http://localhost:3200"] }));
+// Las tres apps se sirven desde su propio subdominio y cada una proxea /api al
+// mismo origen (Nginx en producción, el proxy de Vite en desarrollo). O sea que
+// el navegador nunca cruza de origen y CORS no hace falta en ningún entorno.
+//
+// Se deja el middleware con una lista explícita —y no abierto— para que, si
+// algún día aparece un cliente que sí necesite cross-origin, haya que
+// habilitarlo a propósito en vez de descubrir que ya estaba permitido.
+app.use(cors({ origin: [config.publicUrl] }));
 app.use(express.json({ limit: "2mb" })); // los lotes de catálogo pesan
 
 app.get("/health", (_req, res) => res.json({ ok: true }));

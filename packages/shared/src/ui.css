@@ -1,0 +1,218 @@
+/*
+ * Base de UI para los paneles internos (comercios y admin).
+ *
+ * No usan Tailwind como la tienda: son herramientas de trabajo, con tablas y
+ * formularios densos, y para eso un CSS chico y explícito rinde más que
+ * arrastrar utilidades por todo el markup. La tienda sigue con Tailwind
+ * porque ahí manda el diseño.
+ */
+
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --border: #e2e5ea;
+  --text: #1a1f2b;
+  --text-muted: #667085;
+  --primary: #1c3faa;
+  --primary-hover: #16328a;
+  --primary-soft: #eef2ff;
+  --danger: #b42318;
+  --danger-soft: #fef3f2;
+  --success: #067647;
+  --success-soft: #ecfdf3;
+  --warning: #b54708;
+  --warning-soft: #fffaeb;
+  --radius: 8px;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 17px; margin: 0 0 12px; }
+h3 { font-size: 15px; margin: 0 0 8px; }
+
+a { color: var(--primary); }
+
+/* ── Layout ─────────────────────────────────────────────────────────────── */
+
+.app { display: flex; min-height: 100vh; }
+
+.sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 20px 12px;
+}
+
+.brand { padding: 0 10px 20px; }
+.brand strong { display: block; font-size: 16px; letter-spacing: -0.01em; }
+.brand span { color: var(--text-muted); font-size: 12px; }
+
+.nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.nav button {
+  display: block; width: 100%; text-align: left;
+  padding: 9px 10px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--text-muted);
+  font: inherit; cursor: pointer;
+}
+.nav button:hover { background: var(--bg); color: var(--text); }
+.nav button[aria-current="true"] {
+  background: var(--primary-soft); color: var(--primary); font-weight: 600;
+}
+
+.session { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+.session .who { padding: 0 10px 8px; }
+.session .who strong { display: block; font-size: 13px; }
+.session .who span { color: var(--text-muted); font-size: 12px; }
+
+.main { flex: 1; padding: 28px 32px; max-width: 1400px; min-width: 0; }
+.page-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; margin-bottom: 20px; flex-wrap: wrap;
+}
+.page-head p { margin: 0; color: var(--text-muted); }
+
+/* ── Superficies ────────────────────────────────────────────────────────── */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+.card + .card { margin-top: 16px; }
+
+.grid { display: grid; gap: 16px; }
+.grid.cols-2 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.grid.cols-3 { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.grid.cols-4 { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+
+.stat .label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-muted); font-weight: 600;
+}
+.stat .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+.stat .hint { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+/* ── Tablas ─────────────────────────────────────────────────────────────── */
+
+.table-wrap { overflow-x: auto; }
+/*
+ * min-width fuerza el scroll horizontal en lugar de dejar que el navegador
+ * comprima las columnas hasta romper el texto carácter por carácter. En
+ * pantallas anchas no se nota; en angostas, la tabla se desliza.
+ */
+table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+th {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-muted); font-weight: 600; white-space: nowrap;
+}
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: var(--bg); }
+
+.empty { padding: 36px; text-align: center; color: var(--text-muted); }
+
+/* ── Controles ──────────────────────────────────────────────────────────── */
+
+label { display: block; margin-bottom: 12px; }
+label > span {
+  display: block; font-size: 12px; font-weight: 600;
+  color: var(--text-muted); margin-bottom: 4px;
+}
+label > span .req { color: var(--danger); }
+
+input, select, textarea {
+  width: 100%; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--text); font: inherit;
+}
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid var(--primary); outline-offset: -1px; border-color: var(--primary);
+}
+input[type="checkbox"] { width: auto; margin-right: 6px; }
+textarea { min-height: 72px; resize: vertical; }
+.hint { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+button {
+  padding: 8px 14px; border-radius: 6px; border: 1px solid transparent;
+  font: inherit; font-weight: 500; cursor: pointer;
+}
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+.btn-ghost { background: var(--surface); border-color: var(--border); color: var(--text); }
+.btn-ghost:hover:not(:disabled) { background: var(--bg); }
+.btn-danger { background: var(--danger-soft); color: var(--danger); border-color: #fecdc9; }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* ── Estados ────────────────────────────────────────────────────────────── */
+
+.badge {
+  display: inline-block; padding: 2px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+.badge.neutral { background: var(--bg); color: var(--text-muted); }
+.badge.success { background: var(--success-soft); color: var(--success); }
+.badge.warning { background: var(--warning-soft); color: var(--warning); }
+.badge.danger  { background: var(--danger-soft); color: var(--danger); }
+.badge.info    { background: var(--primary-soft); color: var(--primary); }
+
+.alert { padding: 12px 14px; border-radius: var(--radius); margin-bottom: 16px; font-size: 13px; }
+.alert.error { background: var(--danger-soft); color: var(--danger); }
+.alert.ok { background: var(--success-soft); color: var(--success); }
+.alert.warn { background: var(--warning-soft); color: var(--warning); }
+
+/* ── Login ──────────────────────────────────────────────────────────────── */
+
+.login-screen {
+  min-height: 100vh; display: grid; place-items: center; padding: 20px;
+}
+.login-box { width: 100%; max-width: 380px; }
+.login-box .brand { text-align: center; padding-bottom: 24px; }
+
+/* ── Modal ──────────────────────────────────────────────────────────────── */
+
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(16, 24, 40, 0.45);
+  display: grid; place-items: center; padding: 20px; z-index: 50;
+}
+.modal {
+  background: var(--surface); border-radius: var(--radius);
+  width: 100%; max-width: 560px; max-height: 88vh; overflow-y: auto; padding: 22px;
+}
+.modal h2 { margin-bottom: 16px; }
+
+code {
+  background: var(--bg); padding: 2px 6px; border-radius: 4px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+  white-space: nowrap;
+}
+/*
+ * Sólo las claves de API se parten: son largas y no tienen dónde cortar.
+ * Un SKU corto partido carácter por carácter es ilegible, así que el default
+ * es no romper nunca.
+ */
+.modal code, code.wrap { white-space: normal; word-break: break-all; }
+
+@media (max-width: 780px) {
+  .app { flex-direction: column; }
+  .sidebar { width: 100%; border-right: 0; border-bottom: 1px solid var(--border); }
+  .nav { flex-direction: row; overflow-x: auto; }
+  .main { padding: 20px 16px; }
+}

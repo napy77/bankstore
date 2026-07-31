@@ -1,40 +1,59 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Bankstore — un solo server block sirve todo:
+# Bankstore — tres subdominios, un solo backend
 #
-#   __DOMAIN__/          → estáticos del frontend (__APP_DIR__/dist)
-#   __DOMAIN__/api/      → backend Express (127.0.0.1:__API_PORT__)
+#   __STORE_DOMAIN__     tienda pública          → apps/tienda/dist
+#   __MERCHANT_DOMAIN__  panel de comercios      → apps/comercios/dist
+#   __ADMIN_DOMAIN__     administración          → apps/admin/dist   (INTRANET)
 #
-# Al compartir dominio no hay CORS ni preflight, y alcanza con un certificado.
+# Los tres proxean /api al mismo proceso en 127.0.0.1:__API_PORT__, pero cada
+# uno expone SÓLO las rutas que le corresponden.
 #
-# Este archivo lo genera setup-server.sh desde la plantilla. Después certbot
-# le agrega el bloque 443: a partir de ahí NO se regenera solo (ver el aviso
-# en setup-server.sh).
+# Esto último es la parte importante. El backend ya rechaza a quien no tiene el
+# rol, pero si los tres subdominios proxearan /api entero, /api/admin quedaría
+# alcanzable desde la tienda pública y la restricción de intranet no serviría
+# de nada: bastaría con robar un token de administrador desde afuera. Al cortar
+# en Nginx, un token filtrado tampoco alcanza — hay que estar en la red.
+#
+# Este archivo lo genera setup-server.sh desde la plantilla. Después certbot le
+# agrega los bloques 443 y a partir de ahí NO se regenera solo.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Cabeceras del proxy. Se repiten en los tres bloques; va en un include para
+# no mantener tres copias que se desincronizan.
+# (se escribe en /etc/nginx/snippets/bankstore-proxy.conf)
+
+# ── Tienda pública ───────────────────────────────────────────────────────────
 server {
     listen 80;
     listen [::]:80;
-    server_name __DOMAIN__;
+    server_name __STORE_DOMAIN__;
 
-    # Los assets con hash en el nombre (index-Cf1kdCvC.js) son inmutables:
-    # si cambia el contenido cambia el nombre, así que se pueden cachear para
-    # siempre sin miedo a servir una versión vieja.
+    root __APP_DIR__/apps/tienda/dist;
+
+    # Los assets llevan hash en el nombre: si cambia el contenido cambia el
+    # nombre, así que se pueden cachear para siempre.
     location /assets/ {
-        root __APP_DIR__/dist;
         access_log off;
         expires 1y;
         add_header Cache-Control "public, immutable";
         try_files $uri =404;
     }
 
+    # Sólo lo que necesita un comprador. /api/admin y /api/merchant no existen
+    # desde acá.
+    location ~ ^/api/(auth|catalog|cards|orders)(/|$) {
+        include snippets/bankstore-proxy.conf;
+    }
+
+    # Cualquier otra ruta de /api no existe en este subdominio. Sin esto caería
+    # en el `location /` de abajo y devolvería el HTML del SPA con un 200, que
+    # es lo peor de los dos mundos: no funciona y encima no lo parece.
+    #
+    # Nginx evalúa los regex ANTES de usar el prefijo más largo, así que este
+    # bloque sólo entra en juego cuando ninguna de las rutas permitidas matcheó.
     location /api/ {
-        proxy_pass http://127.0.0.1:__API_PORT__;
-        proxy_http_version 1.1;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 60s;
+        return 404 '{"error":"Ese endpoint no está disponible en este dominio"}';
+        default_type application/json;
     }
 
     location = /health {
@@ -42,27 +61,118 @@ server {
         access_log off;
     }
 
-    # El frontend es una SPA: cualquier ruta que no sea un archivo real tiene
-    # que devolver index.html para que el router del cliente la resuelva. Sin
-    # esto, recargar en /producto/prod-2 daría 404.
     location / {
-        root __APP_DIR__/dist;
         try_files $uri $uri/ /index.html;
-
-        # index.html NO se cachea: es el que apunta a los assets nuevos después
-        # de cada deploy. Si se cachea, el navegador sigue pidiendo los viejos.
         location = /index.html {
             add_header Cache-Control "no-cache, must-revalidate";
         }
     }
 
-    # Cabeceras de seguridad básicas
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-
+    include snippets/bankstore-security.conf;
     client_max_body_size 2m;
-    gzip on;
-    gzip_types text/css application/javascript application/json image/svg+xml;
-    gzip_min_length 1024;
+}
+
+# ── Panel de comercios ───────────────────────────────────────────────────────
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __MERCHANT_DOMAIN__;
+
+    root __APP_DIR__/apps/comercios/dist;
+
+    location /assets/ {
+        access_log off;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # Login de back-office, panel del comercio y la API de integración que
+    # consumen sus ERPs. Nada de /api/admin.
+    location ~ ^/api/(staff|merchant|v1)(/|$) {
+        include snippets/bankstore-proxy.conf;
+    }
+
+    # Cualquier otra ruta de /api no existe en este subdominio. Sin esto caería
+    # en el `location /` de abajo y devolvería el HTML del SPA con un 200, que
+    # es lo peor de los dos mundos: no funciona y encima no lo parece.
+    #
+    # Nginx evalúa los regex ANTES de usar el prefijo más largo, así que este
+    # bloque sólo entra en juego cuando ninguna de las rutas permitidas matcheó.
+    location /api/ {
+        return 404 '{"error":"Ese endpoint no está disponible en este dominio"}';
+        default_type application/json;
+    }
+
+    location = /health {
+        proxy_pass http://127.0.0.1:__API_PORT__/health;
+        access_log off;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+        location = /index.html {
+            add_header Cache-Control "no-cache, must-revalidate";
+        }
+    }
+
+    include snippets/bankstore-security.conf;
+    # Los lotes de catálogo son de hasta 500 productos.
+    client_max_body_size 4m;
+}
+
+# ── Administración — sólo intranet ───────────────────────────────────────────
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __ADMIN_DOMAIN__;
+
+    root __APP_DIR__/apps/admin/dist;
+
+    # Let's Encrypt valida por HTTP desde internet, así que el challenge tiene
+    # que quedar abierto aunque el resto del sitio no lo esté. Va primero para
+    # ganarle a las reglas de abajo.
+    location ^~ /.well-known/acme-challenge/ {
+        allow all;
+        root /var/www/html;
+    }
+
+    # A partir de acá, sólo la intranet. setup-server.sh escribe las redes
+    # permitidas en este snippet a partir de ADMIN_ALLOWED_CIDRS.
+    include snippets/bankstore-admin-allow.conf;
+
+    location /assets/ {
+        access_log off;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # El único lugar del mundo desde donde se llega a /api/admin.
+    location ~ ^/api/(staff|admin|catalog)(/|$) {
+        include snippets/bankstore-proxy.conf;
+    }
+
+    # Cualquier otra ruta de /api no existe en este subdominio. Sin esto caería
+    # en el `location /` de abajo y devolvería el HTML del SPA con un 200, que
+    # es lo peor de los dos mundos: no funciona y encima no lo parece.
+    #
+    # Nginx evalúa los regex ANTES de usar el prefijo más largo, así que este
+    # bloque sólo entra en juego cuando ninguna de las rutas permitidas matcheó.
+    location /api/ {
+        return 404 '{"error":"Ese endpoint no está disponible en este dominio"}';
+        default_type application/json;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+        location = /index.html {
+            add_header Cache-Control "no-cache, must-revalidate";
+        }
+    }
+
+    include snippets/bankstore-security.conf;
+    # Que no aparezca en buscadores aunque alguien lo exponga por error.
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    client_max_body_size 2m;
 }

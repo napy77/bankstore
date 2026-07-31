@@ -12,8 +12,8 @@
  */
 import bcrypt from "bcryptjs";
 import { pool, runMigrations } from "./db.js";
-import { BANKS, INITIAL_CARDS } from "../../src/data/banks.js";
-import { PRODUCTS } from "../../src/data/products.js";
+import { BANKS, INITIAL_CARDS } from "../../apps/tienda/src/data/banks.js";
+import { PRODUCTS } from "../../apps/tienda/src/data/products.js";
 
 const CATEGORIES: Record<string, string> = {
   tecnologia: "Tecnología",

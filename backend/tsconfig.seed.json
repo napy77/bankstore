@@ -6,6 +6,6 @@
     "noEmit": true,
     "rootDir": ".."
   },
-  "include": ["src/seed.ts", "../src/data", "../src/types.ts"],
+  "include": ["src/seed.ts", "../apps/tienda/src/data", "../apps/tienda/src/types.ts"],
   "exclude": []
 }

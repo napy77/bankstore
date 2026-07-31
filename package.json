@@ -1,32 +1,28 @@
 {
   "name": "bankstore",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "backend"
+  ],
   "scripts": {
-    "dev": "vite --port=3200 --strictPort",
-    "build": "vite build",
-    "preview": "vite preview",
-    "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@tailwindcss/vite": "^4.1.14",
-    "@vitejs/plugin-react": "^5.0.4",
-    "lucide-react": "^0.546.0",
-    "motion": "^12.23.24",
-    "react": "^19.0.1",
-    "react-dom": "^19.0.1"
+    "dev:tienda": "npm run dev --workspace @bankstore/tienda",
+    "dev:comercios": "npm run dev --workspace @bankstore/comercios",
+    "dev:admin": "npm run dev --workspace @bankstore/admin",
+    "dev:api": "npm run dev --workspace bankstore-backend",
+    "build": "npm run build --workspace @bankstore/tienda && npm run build --workspace @bankstore/comercios && npm run build --workspace @bankstore/admin",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm test --workspace bankstore-backend"
   },
   "devDependencies": {
-    "@types/node": "^22.14.0",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "tailwindcss": "^4.1.14",
-    "typescript": "~5.8.2",
-    "vite": "^6.2.3"
+    "typescript": "~5.8.2"
   },
   "allowScripts": {
-    "esbuild@0.25.12": true
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.1": true,
+    "fsevents@2.3.3": true
   }
 }

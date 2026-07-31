@@ -6,7 +6,13 @@ de cuotas, beneficios por banco/comercio, billetera y checkout con sub-órdenes.
 - **Frontend** — diseñado con Google Stitch / AI Studio, migrado a proyecto propio.
 - **Backend** — Express + PostgreSQL, con toda la lógica de precios, cuotas y beneficios.
 
-Producción: **https://bankstore.nexopos.app**
+Producción — tres subdominios, un solo backend:
+
+| | | |
+| --- | --- | --- |
+| Tienda | `tienda.<dominio>` | pública |
+| Panel de comercios | `comercios.<dominio>` | público, con login |
+| Administración | `admin.<dominio>` | **sólo intranet** |
 
 ## Stack
 
@@ -24,17 +30,40 @@ Base de datos:
 docker compose up -d
 ```
 
+Instalar todo el monorepo de una:
+
+```bash
+npm install
+```
+
 Backend (puerto 4020):
 
 ```bash
-cd backend && npm install && npm run migrate && npm run seed && npm run seed:marketplace && npm run dev
+npm run migrate --workspace bankstore-backend && npm run seed --workspace bankstore-backend && npm run seed:marketplace --workspace bankstore-backend && npm run dev:api
 ```
 
-Frontend (puerto 3200):
+Los tres frontends, cada uno en su puerto:
 
 ```bash
-npm install && npm run dev
+npm run dev:tienda
 ```
+
+```bash
+npm run dev:comercios
+```
+
+```bash
+npm run dev:admin
+```
+
+| App | Puerto |
+| --- | --- |
+| Tienda | 3200 |
+| Comercios | 3210 |
+| Admin | 3220 |
+
+Cada uno proxea `/api` al backend, igual que Nginx en producción: no hay CORS
+en ningún entorno.
 
 Cuentas de prueba que deja el seed:
 
@@ -147,13 +176,15 @@ con un comercio reemplaza al general, para bien o para mal. Está explicado en
 
 ## Scripts
 
-Frontend (raíz):
+Raíz del monorepo:
 
 | Script | Qué hace |
 | --- | --- |
-| `npm run dev` | Vite en :3200 |
-| `npm run build` | Build a `dist/` |
-| `npm run lint` | `tsc --noEmit` |
+| `npm run dev:tienda` · `dev:comercios` · `dev:admin` | Vite de cada app |
+| `npm run dev:api` | Backend con recarga |
+| `npm run build` | Compila las tres apps |
+| `npm run lint` | Typecheck de todos los workspaces |
+| `npm test` | Tests del backend |
 
 Backend (`backend/`):
 
@@ -170,11 +201,18 @@ Backend (`backend/`):
 ## Estructura
 
 ```
-src/                        Frontend
-  App.tsx                   Layout, filtros, estado (carrito, tarjetas, compras)
-  types.ts                  Bank, CreditCard, Product, CartItem, Purchase
-  data/                     Catálogo del prototipo (fuente del seed)
-  components/               Wallet, ProductCard, simulador, carrito, checkout
+apps/
+  tienda/                   Vidriera pública (React + Tailwind, diseño de Stitch)
+    src/data/               Catálogo del prototipo (fuente del seed)
+  comercios/                Panel del comercio: catálogo, órdenes, API keys
+  admin/                    Administración: comercios, acuerdos, liquidaciones
+
+packages/shared/            Compartido por las tres apps
+  src/client.ts             Fetch tipado, token por ámbito, manejo de 401
+  src/types.ts              Tipos del dominio (espejo de la API)
+  src/format.ts             Plata, tasas y fechas, formateadas igual en todos lados
+  src/session.tsx           Login y layout de back-office
+  src/ui.tsx · ui.css       Piezas de UI de los paneles internos
 
 backend/
   migrations/

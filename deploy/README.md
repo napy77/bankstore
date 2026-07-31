@@ -1,52 +1,97 @@
 # Despliegue de Bankstore
 
-Bankstore convive en la misma VM que NexoPOS y ClubPay. Carpeta, usuario del
-sistema, base de datos, puerto y server block de Nginx son propios: ningún
-script toca nada de los otros dos.
+Tres subdominios, un solo backend, una sola base.
+
+| Subdominio | Sirve | Acceso | Rutas de API que expone |
+| --- | --- | --- | --- |
+| `tienda.<dominio>` | `apps/tienda/dist` | Público | `/api/auth`, `/api/catalog`, `/api/cards`, `/api/orders` |
+| `comercios.<dominio>` | `apps/comercios/dist` | Público (con login) | `/api/staff`, `/api/merchant`, `/api/v1` |
+| `admin.<dominio>` | `apps/admin/dist` | **Sólo intranet** | `/api/staff`, `/api/admin`, `/api/catalog` |
+
+Cada uno proxea `/api` al mismo proceso en `127.0.0.1:4020`, pero **sólo las
+rutas de su columna**. Todo lo demás bajo `/api` devuelve 404.
+
+## Por qué el corte está en Nginx y no sólo en el token
+
+El backend ya rechaza a quien no tiene el rol. Pero si los tres subdominios
+proxearan `/api` entero, `/api/admin` quedaría alcanzable desde la tienda
+pública, y la restricción de intranet no serviría de nada: alcanzaría con robar
+un token de administrador para operar desde cualquier lado.
+
+Cortando en Nginx, un token filtrado tampoco alcanza — hay que estar en la red.
+Son tres capas para lo mismo, a propósito: red, token y rol.
+
+Para comprobar que el ruteo hace lo que dice:
+
+```bash
+python3 deploy/verificar-ruteo.py
+```
+
+Simula el algoritmo de resolución de `location` de Nginx contra la plantilla y
+verifica ruta por ruta qué subdominio llega al backend y cuál no. Conviene
+correrlo después de tocar la plantilla: `nginx -t` valida la sintaxis, esto
+valida la intención.
+
+## Convivencia en la VM
+
+Bankstore comparte servidor con NexoPOS y ClubPay sin pisarlos: carpeta,
+usuario del sistema, base, puerto y server blocks propios.
 
 | App | API | Front | Base | Carpeta |
 | --- | --- | --- | --- | --- |
 | NexoPOS | 4000 | 3000 | `nexopos` | `/opt/nexopos` |
 | ClubPay | 4010 | 3110 | `clubpay` | `/opt/clubpay` |
-| **Bankstore** | **4020** | — (estático) | `bankstore` | `/opt/bankstore` |
+| **Bankstore** | **4020** | — (3 estáticos) | `bankstore` | `/opt/bankstore` |
 
-El frontend de Bankstore no necesita proceso: compila a estáticos y los sirve
-Nginx desde `/opt/bankstore/dist`. Por eso ocupa un solo puerto.
+Los tres frontends de Bankstore compilan a estáticos: no necesitan proceso, los
+sirve Nginx. Por eso ocupa un solo puerto pese a tener tres sitios.
 
-Todo se sirve desde un único dominio:
-
-```
-bankstore.nexopos.app/       → estáticos (dist/)
-bankstore.nexopos.app/api/   → backend Express en 127.0.0.1:4020
-```
-
-Un solo certificado y sin CORS, porque el navegador nunca cruza de origen.
+Lo único compartido entre las tres apps es Node (el del sistema, 20+), Nginx y
+PostgreSQL.
 
 ## Instalación desde cero
+
+**1. DNS.** Los tres subdominios apuntando (registro A) a la IP del servidor.
+El de admin también: Let's Encrypt valida por HTTP desde internet aunque
+después el sitio quede restringido.
+
+```bash
+dig +short tienda.bankstore.nexopos.app comercios.bankstore.nexopos.app admin.bankstore.nexopos.app
+```
+
+**2. Clonar.**
 
 ```bash
 sudo git clone -b main https://github.com/napy77/bankstore.git /opt/bankstore
 ```
 
+**3. Configurar.**
+
 ```bash
 sudo cp /opt/bankstore/deploy/bankstore.env.example /etc/bankstore-deploy.env
 sudo chmod 600 /etc/bankstore-deploy.env
-sudo nano /etc/bankstore-deploy.env
+sudo vi /etc/bankstore-deploy.env
 ```
 
-Antes de seguir, que el DNS resuelva:
+Lo que hay que revisar sí o sí: los tres dominios, `ADMIN_ALLOWED_CIDRS` y
+`ADMIN_PASSWORD`.
 
-```bash
-dig +short bankstore.nexopos.app
-```
+**4. Preparar el servidor.**
 
 ```bash
 sudo bash /opt/bankstore/deploy/setup-server.sh
 ```
 
+Crea usuario, base, `.env` con secretos al azar, snippets de Nginx, los tres
+server blocks y la unit de systemd. Es idempotente.
+
+**5. Certificados.** Los tres en una sola corrida, así comparten renovación:
+
 ```bash
-sudo certbot --nginx -d bankstore.nexopos.app --agree-tos -m germanyovan@gmail.com --redirect
+sudo certbot --nginx -d tienda.bankstore.nexopos.app -d comercios.bankstore.nexopos.app -d admin.bankstore.nexopos.app --agree-tos -m germanyovan@gmail.com --redirect
 ```
+
+**6. Desplegar.**
 
 ```bash
 sudo bash /opt/bankstore/deploy/deploy.sh
@@ -58,13 +103,41 @@ sudo bash /opt/bankstore/deploy/deploy.sh
 sudo bash /opt/bankstore/deploy/deploy.sh
 ```
 
-Trae la rama, reinstala dependencias, compila backend y frontend, corre las
-migraciones, reinicia la API y verifica que responda. Si algo falla después
-del build, el commit anterior queda guardado:
+Trae la rama, instala dependencias de todos los workspaces, compila backend y
+las tres apps, migra, reinicia la API y verifica. Si algo falla después del
+build:
 
 ```bash
 sudo bash /opt/bankstore/deploy/deploy.sh --rollback
 ```
+
+## Cambiar de dominio
+
+Cuando el proyecto tenga dominio propio (por ejemplo `bancolapampa.com.ar`):
+
+1. Apuntar el DNS de los tres subdominios nuevos.
+2. Cambiar `STORE_DOMAIN`, `MERCHANT_DOMAIN` y `ADMIN_DOMAIN` en
+   `/etc/bankstore-deploy.env`. Poner el dominio viejo en `LEGACY_DOMAIN` para
+   que redirija.
+3. Borrar el server block y regenerarlo (certbot lo tiene congelado):
+
+```bash
+sudo rm /etc/nginx/sites-available/bankstore && sudo bash /opt/bankstore/deploy/setup-server.sh
+```
+
+4. Pedir los certificados nuevos y desplegar.
+
+## Cambiar quién entra al admin
+
+Es lo que más se toca (cambió la VPN, se sumó una oficina). Editar
+`ADMIN_ALLOWED_CIDRS` y volver a correr el setup:
+
+```bash
+sudo vi /etc/bankstore-deploy.env && sudo bash /opt/bankstore/deploy/setup-server.sh
+```
+
+El setup regenera la lista de redes **aunque el server block esté congelado por
+certbot**, justamente para que este cambio no obligue a rehacer certificados.
 
 ## Operación
 
@@ -83,26 +156,20 @@ sudo ss -ltnp | grep -E '3000|3110|4000|4010|4020'
 ## Cosas que conviene saber
 
 **El `.env` del backend no se regenera.** `setup-server.sh` lo crea la primera
-vez con un `JWT_SECRET` al azar. Si volvés a correr el setup, actualiza puerto,
-URL y tasas, pero conserva el secreto: si cambiara, se caerían todas las
-sesiones abiertas.
+vez con un `JWT_SECRET` al azar. Al re-correrlo actualiza puerto, URL y tasas,
+pero conserva el secreto: si cambiara, se caerían todas las sesiones.
 
-**Certbot escribe sobre el server block.** Después de pedir el certificado,
-`/etc/nginx/sites-available/bankstore` tiene el bloque 443 que agregó certbot.
-`setup-server.sh` lo detecta y no lo pisa. Si necesitás regenerarlo (cambio de
-dominio o de puerto), borralo, corré el setup y volvé a pedir el certificado.
+**Certbot escribe sobre el server block.** Después de pedir los certificados,
+`setup-server.sh` lo detecta y no lo pisa. Los snippets sí se actualizan
+siempre.
 
 **Las tasas se cambian sin deploy.** `TNA_DEFAULT` e `IVA_INTERESES` viven en
-`/etc/bankstore-deploy.env` y se copian al `.env` del backend. Para cambiarlas:
-editá el `.env` del backend y `sudo systemctl restart bankstore-api`.
+el `.env` del backend. Editarlas y `sudo systemctl restart bankstore-api`.
 
-**`SEED_DEMO_DATA=true` recarga el catálogo en cada deploy.** Es lo que querés
-en un entorno de prueba. Para producción real, ponelo en `false`: el seed no
-borra órdenes ni usuarios, pero pisa precios y promos con los del prototipo.
+**`SEED_DEMO_DATA=true` recarga catálogo y comercios de ejemplo en cada
+deploy.** Para producción real, ponerlo en `false`: no borra órdenes ni
+usuarios, pero pisa precios, promos y comercios de demo.
 
-**Repo privado.** Si `napy77/bankstore` es privado, el clone con HTTPS pide
-credenciales y el script falla. Generá un token de solo lectura y poné:
-
-```
-REPO_URL=https://<token>@github.com/napy77/bankstore.git
-```
+**Las API keys sólo se generan la primera vez.** El secreto no se puede
+recuperar, así que el seed no las regenera: rompería integraciones ya
+configuradas.
