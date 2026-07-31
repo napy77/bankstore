@@ -333,6 +333,11 @@ if [[ -f "$NGINX_CONF" ]] && grep -q 'ssl_certificate' "$NGINX_CONF"; then
   warn "    sudo bash $HERE/setup-server.sh"
   warn "    sudo certbot --nginx -d $STORE_DOMAIN -d $MERCHANT_DOMAIN -d $ADMIN_DOMAIN --redirect"
   nginx -t || die "La configuración de Nginx no valida."
+  # Sin este reload, los snippets quedan actualizados en disco pero Nginx sigue
+  # sirviendo lo que tenía en memoria: se cambia la lista de redes del admin y
+  # no pasa nada, que es justo lo contrario de para lo que están los snippets.
+  systemctl reload nginx
+  ok "Nginx recargado: los snippets nuevos ya están en efecto"
 else
   # En un servidor sin IPv6, `listen [::]:80` hace fallar TODO Nginx —incluido
   # NexoPOS y ClubPay— con "Address family not supported". Se saca si no hay.
@@ -389,6 +394,12 @@ systemctl enable bankstore-api >/dev/null
 ok "bankstore-api habilitado al arranque"
 
 # ─── Cierre ──────────────────────────────────────────────────────────────────
+if [[ -n "${ADMIN_ALLOWED_CIDRS:-}" ]]; then
+  ACCESO_ADMIN="sólo desde $ADMIN_ALLOWED_CIDRS"
+else
+  ACCESO_ADMIN="SIN restricción de red"
+fi
+
 cat <<EOF
 
 ┌────────────────────────────────────────────────────────────────────────────┐
@@ -421,11 +432,18 @@ cat <<EOF
 │  Después del deploy                                                        │
 └────────────────────────────────────────────────────────────────────────────┘
 
-  Tienda      https://$STORE_DOMAIN          pública
-  Comercios   https://$MERCHANT_DOMAIN       pública (login)
-  Admin       https://$ADMIN_DOMAIN          sólo desde $ADMIN_ALLOWED_CIDRS
-
-  Comprobá que la restricción del admin funciona desde afuera de la red:
-  tiene que dar 403.
+  Tienda      https://$STORE_DOMAIN
+  Comercios   https://$MERCHANT_DOMAIN
+  Admin       https://$ADMIN_DOMAIN
+              $ACCESO_ADMIN
 
 EOF
+
+if [[ -n "${ADMIN_ALLOWED_CIDRS:-}" ]]; then
+  echo "  Comprobá desde afuera de la red que el admin dé 403."
+  echo
+else
+  warn "El admin no tiene filtro de red. Antes de datos reales, completá"
+  warn "ADMIN_ALLOWED_CIDRS y cambiá ADMIN_PASSWORD en $CONFIG."
+  echo
+fi
