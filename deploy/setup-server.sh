@@ -57,13 +57,20 @@ fi
 # shellcheck disable=SC1090
 source "$CONFIG"
 
-for var in STORE_DOMAIN MERCHANT_DOMAIN ADMIN_DOMAIN ADMIN_ALLOWED_CIDRS \
+# ADMIN_ALLOWED_CIDRS no entra acá a propósito: vacío es un valor válido y
+# significa "sin restricción de red", que es lo que se quiere mientras se
+# prueba.
+for var in STORE_DOMAIN MERCHANT_DOMAIN ADMIN_DOMAIN \
            APP_DIR REPO_URL BRANCH APP_USER API_PORT DB_NAME DB_USER; do
   [[ -n "${!var:-}" ]] || die "Falta $var en $CONFIG"
 done
 ok "Tienda     : https://$STORE_DOMAIN"
 ok "Comercios  : https://$MERCHANT_DOMAIN"
-ok "Admin      : https://$ADMIN_DOMAIN  (sólo desde $ADMIN_ALLOWED_CIDRS)"
+if [[ -n "${ADMIN_ALLOWED_CIDRS:-}" ]]; then
+  ok "Admin      : https://$ADMIN_DOMAIN  (sólo desde $ADMIN_ALLOWED_CIDRS)"
+else
+  warn "Admin      : https://$ADMIN_DOMAIN  (ABIERTO: sin restricción de red)"
+fi
 ok "API interna: 127.0.0.1:$API_PORT · carpeta $APP_DIR · base $DB_NAME"
 
 say "Verificando herramientas"
@@ -251,20 +258,40 @@ render "$HERE/nginx/proxy.snippet.conf"    > /etc/nginx/snippets/bankstore-proxy
 render "$HERE/nginx/security.snippet.conf" > /etc/nginx/snippets/bankstore-security.conf
 ok "snippets de proxy y seguridad instalados"
 
-# Lista de redes que pueden entrar a la administración. Se regenera siempre,
-# incluso cuando el server block ya está congelado por certbot: es lo único que
-# uno necesita cambiar seguido (cambió la VPN, se sumó una oficina) y no
-# debería obligar a rehacer los certificados.
-{
-  echo "# Generado por deploy/setup-server.sh — $(date -Iseconds)"
-  echo "# Redes con acceso a $ADMIN_DOMAIN. Se edita ADMIN_ALLOWED_CIDRS en"
-  echo "# $CONFIG y se vuelve a correr el setup."
-  for cidr in $ADMIN_ALLOWED_CIDRS; do
-    echo "allow $cidr;"
-  done
-  echo "deny all;"
-} > /etc/nginx/snippets/bankstore-admin-allow.conf
-ok "acceso a la administración limitado a: $ADMIN_ALLOWED_CIDRS"
+# Quién puede entrar a la administración. Se regenera siempre, incluso cuando
+# el server block ya está congelado por certbot: es lo único que uno necesita
+# cambiar seguido (cambió la VPN, se sumó una oficina, hay que probar desde
+# afuera) y no debería obligar a rehacer los certificados.
+ADMIN_SNIPPET=/etc/nginx/snippets/bankstore-admin-allow.conf
+
+if [[ -z "${ADMIN_ALLOWED_CIDRS:-}" ]]; then
+  # Vacío = sin restricción de red. La plantilla sigue incluyendo el snippet,
+  # así que volver a cerrarlo es completar la variable y re-correr el setup:
+  # no hay que tocar la configuración de Nginx.
+  {
+    echo "# Generado por deploy/setup-server.sh — $(date -Iseconds)"
+    echo "# ADMIN_ALLOWED_CIDRS está VACÍO en $CONFIG: sin restricción de red."
+    echo "# Para volver a limitarlo, completá esa variable y re-corré el setup."
+    echo "allow all;"
+  } > "$ADMIN_SNIPPET"
+  warn "El panel de administración queda accesible DESDE INTERNET."
+  warn "Sigue pidiendo usuario y contraseña, pero cualquiera puede llegar al login."
+  warn "Antes de cargar datos reales:"
+  warn "    1. poné ADMIN_ALLOWED_CIDRS en $CONFIG"
+  warn "    2. cambiá ADMIN_PASSWORD (con esa cuenta se toca cualquier comercio)"
+  warn "    3. sudo bash $HERE/setup-server.sh"
+else
+  {
+    echo "# Generado por deploy/setup-server.sh — $(date -Iseconds)"
+    echo "# Redes con acceso a $ADMIN_DOMAIN. Se edita ADMIN_ALLOWED_CIDRS en"
+    echo "# $CONFIG y se vuelve a correr el setup."
+    for cidr in $ADMIN_ALLOWED_CIDRS; do
+      echo "allow $cidr;"
+    done
+    echo "deny all;"
+  } > "$ADMIN_SNIPPET"
+  ok "acceso a la administración limitado a: $ADMIN_ALLOWED_CIDRS"
+fi
 
 # Certbot necesita escribir el challenge acá
 mkdir -p /var/www/html

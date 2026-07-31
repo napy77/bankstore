@@ -6,7 +6,7 @@ Tres subdominios, un solo backend, una sola base.
 | --- | --- | --- | --- |
 | `bankstore.nexopos.app` | `apps/tienda/dist` | Público | `/api/auth`, `/api/catalog`, `/api/cards`, `/api/orders` |
 | `comercios.bankstore.nexopos.app` | `apps/comercios/dist` | Público (con login) | `/api/staff`, `/api/merchant`, `/api/v1` |
-| `admin.bankstore.nexopos.app` | `apps/admin/dist` | **Sólo intranet** | `/api/staff`, `/api/admin`, `/api/catalog` |
+| `admin.bankstore.nexopos.app` | `apps/admin/dist` | Según `ADMIN_ALLOWED_CIDRS` | `/api/staff`, `/api/admin`, `/api/catalog` |
 
 Cada uno proxea `/api` al mismo proceso en `127.0.0.1:4020`, pero **sólo las
 rutas de su columna**. Todo lo demás bajo `/api` devuelve 404.
@@ -167,8 +167,27 @@ sudo rm /etc/nginx/sites-available/bankstore && sudo bash /opt/bankstore/deploy/
 
 ## Cambiar quién entra al admin
 
-Es lo que más se toca (cambió la VPN, se sumó una oficina). Editar
-`ADMIN_ALLOWED_CIDRS` y volver a correr el setup:
+`ADMIN_ALLOWED_CIDRS` controla desde qué redes se llega a `admin.<dominio>`.
+
+**Vacío = sin restricción de red.** Es como está hoy, mientras se prueba con
+datos mock: pelear con la VPN en cada cambio no aporta nada cuando no hay nada
+real que proteger. El panel sigue pidiendo usuario y contraseña; lo que no hay
+es filtro de red.
+
+**Antes de cargar datos reales** hay que cerrarlo:
+
+1. Completar `ADMIN_ALLOWED_CIDRS` con las redes que correspondan.
+2. Cambiar `ADMIN_PASSWORD` — con esa cuenta se toca cualquier comercio y
+   cualquier condición comercial.
+3. Re-correr el setup.
+
+La lógica de restricción queda instalada en los dos casos: la plantilla de
+Nginx siempre incluye el snippet, y el setup lo regenera con `allow all;` o con
+la lista de redes según la variable. Volver a cerrarlo no toca la configuración
+de Nginx ni obliga a rehacer los certificados.
+
+Es lo que más se toca (cambió la VPN, se sumó una oficina, hay que probar desde
+afuera), así que:
 
 ```bash
 sudo vi /etc/bankstore-deploy.env && sudo bash /opt/bankstore/deploy/setup-server.sh
