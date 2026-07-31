@@ -76,14 +76,40 @@ NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
 [[ "$NODE_MAJOR" -ge 20 ]] || die "Node $NODE_MAJOR es viejo: el backend usa ESM + Node 20+."
 ok "Node $(node -v)"
 
-# El puerto es el error más fácil de cometer al meter un tercer proyecto
-say "Verificando que el puerto esté libre"
-if ss -ltn 2>/dev/null | grep -q ":$API_PORT "; then
-  die "El puerto $API_PORT ya está ocupado (¿NexoPOS en 4000? ¿ClubPay en 4010?).
+# El puerto es el error más fácil de cometer al meter un tercer proyecto.
+#
+# Pero ojo: al re-correr el setup, el puerto está ocupado por NUESTRO propio
+# backend, que quedó corriendo del deploy anterior. Eso es lo normal y no un
+# conflicto, así que hay que distinguir quién lo tiene antes de frenar; si no,
+# el script deja de ser idempotente apenas se desplegó una vez.
+say "Verificando el puerto de la API"
+
+# PID que escucha en el puerto, o vacío si está libre.
+#
+# El campo 4 de `ss -ltnp` es la dirección local ("127.0.0.1:4020"), así que el
+# patrón va anclado al final: sin el $ final, el puerto 20 matchearía contra
+# :4020, y sin los dos puntos adelante pasaría lo mismo al revés.
+pid_escuchando() {
+  ss -ltnp 2>/dev/null \
+    | awk -v puerto=":$1\$" '$4 ~ puerto { if (match($0, /pid=[0-9]+/)) { print substr($0, RSTART+4, RLENGTH-4); exit } }'
+}
+
+PID_EN_PUERTO=$(pid_escuchando "$API_PORT")
+if [[ -z "$PID_EN_PUERTO" ]]; then
+  ok "puerto $API_PORT libre"
+else
+  PID_NUESTRO=$(systemctl show -p MainPID --value bankstore-api 2>/dev/null || echo 0)
+  if [[ -n "$PID_NUESTRO" && "$PID_NUESTRO" != "0" && "$PID_EN_PUERTO" == "$PID_NUESTRO" ]]; then
+    ok "puerto $API_PORT ocupado por bankstore-api (nuestro): normal al re-correr el setup"
+  else
+    QUIEN=$(ps -o comm= -p "$PID_EN_PUERTO" 2>/dev/null || echo "desconocido")
+    die "El puerto $API_PORT ya lo usa otro proceso: $QUIEN (pid $PID_EN_PUERTO).
+
+     No es el backend de Bankstore. ¿NexoPOS en 4000? ¿ClubPay en 4010?
      Cambiá API_PORT en $CONFIG y volvé a correr.
      Para ver qué hay tomado: sudo ss -ltnp"
+  fi
 fi
-ok "puerto $API_PORT libre"
 
 # ─── 2. Usuario y carpeta ────────────────────────────────────────────────────
 say "Usuario del sistema y carpeta"
