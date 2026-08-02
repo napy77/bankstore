@@ -76,3 +76,24 @@ export const ROLE_LABEL: Record<string, string> = {
   merchant_admin: "Administrador del comercio",
   merchant_staff: "Operador",
 };
+
+// ── Unidades ─────────────────────────────────────────────────────────────────
+// La API guarda milímetros y gramos. Estas funciones son sólo para mostrar:
+// la conversión al guardar la hace el servidor, que es donde tiene que estar.
+
+export function mmToCm(mm: number): number {
+  return Math.round((mm / 10) * 100) / 100;
+}
+
+export function gToKg(g: number): number {
+  return Math.round((g / 1000) * 1000) / 1000;
+}
+
+/**
+ * Peso volumétrico en kg, con el divisor estándar de plaza (5000 cm³/kg).
+ * Se replica del backend para poder mostrarlo mientras el comercio escribe,
+ * sin ir al servidor en cada tecla.
+ */
+export function volumetricKg(heightMm: number, widthMm: number, lengthMm: number): number {
+  return Math.round(((heightMm * widthMm * lengthMm) / 1000 / 5000) * 1000) / 1000;
+}

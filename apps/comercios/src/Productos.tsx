@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
   type ApiClient, type MerchantProduct, type MerchantProfile,
-  money, dateTime, ErrorBanner, Loading, Empty, Badge, Modal, AutoForm, type Field,
+  money, dateTime, gToKg, ErrorBanner, Loading, Empty, Badge, Modal,
 } from "@bankstore/shared";
+import { ProductoForm } from "./ProductoForm.js";
 
 export function Productos({ api }: { api: ApiClient }) {
   const [items, setItems] = useState<MerchantProduct[]>([]);
@@ -11,7 +12,6 @@ export function Productos({ api }: { api: ApiClient }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState<MerchantProduct | "nuevo" | null>(null);
-  const [busy, setBusy] = useState(false);
 
   const cargar = useCallback(
     (q: string) => {
@@ -30,46 +30,6 @@ export function Productos({ api }: { api: ApiClient }) {
   useEffect(() => {
     api.get<MerchantProfile>("/api/merchant/profile", "staff").then(setProfile).catch(() => {});
   }, [api]);
-
-  // El backend limita la categoría a las habilitadas para el comercio; el
-  // select refleja lo mismo para no ofrecer opciones que van a ser rechazadas.
-  const campos: Field[] = [
-    { name: "sku", label: "SKU (tu código interno)", required: true,
-      hint: "Es la clave de sincronización: si repetís un SKU, se actualiza ese producto en vez de crear otro." },
-    { name: "name", label: "Nombre", required: true },
-    { name: "description", label: "Descripción", type: "textarea" },
-    { name: "price", label: "Precio de venta", type: "number", step: "0.01", required: true },
-    { name: "originalPrice", label: "Precio de lista (tachado)", type: "number", step: "0.01",
-      hint: "Opcional. Tiene que ser mayor o igual al de venta." },
-    { name: "categoryId", label: "Categoría", type: "select", required: true,
-      options: (profile?.categories ?? []).map((c) => ({ value: c, label: c })) },
-    { name: "kind", label: "Tipo", type: "select",
-      options: [
-        { value: "physical", label: "Producto físico (se despacha)" },
-        { value: "service", label: "Servicio (hotel, spa, viaje)" },
-      ] },
-    { name: "stock", label: "Stock", type: "number", required: true },
-    { name: "active", label: "Publicado en la tienda", type: "checkbox" },
-  ];
-
-  async function guardar(values: Record<string, unknown>) {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.post("/api/merchant/products", {
-        ...values,
-        specs: [],
-        features: [],
-        image: (values.image as string) ?? "",
-      }, "staff");
-      setEditing(null);
-      cargar(search);
-    } catch (err) {
-      setError(err);
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function cambiarStock(p: MerchantProduct, stock: number) {
     try {
@@ -136,7 +96,9 @@ export function Productos({ api }: { api: ApiClient }) {
                 <tr>
                   <th>SKU</th>
                   <th>Producto</th>
+                  <th>Marca</th>
                   <th>Categoría</th>
+                  <th>Logística</th>
                   <th className="num">Precio</th>
                   <th className="num">Stock</th>
                   <th>Estado</th>
@@ -152,7 +114,23 @@ export function Productos({ api }: { api: ApiClient }) {
                       <strong>{p.name}</strong>
                       {p.kind === "service" && <> <Badge tone="info">servicio</Badge></>}
                     </td>
-                    <td>{p.category}</td>
+                    <td>
+                      {p.brandName ?? <span className="hint">sin marca</span>}
+                    </td>
+                    <td>
+                      {p.category}
+                      {p.secondCategory && <div className="hint">+ {p.secondCategory}</div>}
+                    </td>
+                    <td>
+                      {p.packages && p.packages.length > 0 ? (
+                        <span className="hint">
+                          {p.packages.length} bulto{p.packages.length > 1 ? "s" : ""} ·{" "}
+                          {gToKg(p.packages.reduce((a, k) => a + k.weightG, 0))} kg
+                        </span>
+                      ) : (
+                        <Badge tone="warning">sin dimensiones</Badge>
+                      )}
+                    </td>
                     <td className="num">
                       {money(p.price)}
                       {p.originalPrice && (
@@ -197,30 +175,21 @@ export function Productos({ api }: { api: ApiClient }) {
         )}
       </div>
 
-      {editing && (
+      {editing && profile && (
         <Modal
           title={editing === "nuevo" ? "Nuevo producto" : `Editar ${editing.name}`}
           onClose={() => setEditing(null)}
         >
-          <ErrorBanner error={error} />
-          <AutoForm
-            fields={campos}
-            initial={
-              editing === "nuevo"
-                ? { sku: "", name: "", description: "", price: null, originalPrice: null,
-                    categoryId: profile?.categories[0] ?? "", kind: "physical", stock: 0, active: true }
-                : { sku: editing.sku, name: editing.name, description: editing.description,
-                    price: editing.price, originalPrice: editing.originalPrice,
-                    categoryId: editing.category, kind: editing.kind,
-                    stock: editing.stock, active: editing.active }
-            }
-            submitLabel="Guardar"
-            busy={busy}
-            onSubmit={guardar}
-            onCancel={() => setEditing(null)}
+          <ProductoForm
+            api={api}
+            profile={profile}
+            editando={editing === "nuevo" ? null : editing}
+            onGuardado={() => { setEditing(null); cargar(search); }}
+            onCancelar={() => setEditing(null)}
           />
         </Modal>
       )}
+
     </>
   );
 }

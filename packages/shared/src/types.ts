@@ -173,6 +173,39 @@ export interface Order {
 
 // ── Panel del comercio ───────────────────────────────────────────────────────
 
+/**
+ * Marca / fabricante del producto. Se llama ProductBrand y no Brand para no
+ * chocar con el componente de la marca gráfica de Bankstore (session.tsx).
+ */
+export interface ProductBrand {
+  id: number;
+  name: string;
+  needsReview?: boolean;
+}
+
+export interface CategoryNode {
+  id: string;
+  name: string;
+  children: CategoryNode[];
+}
+
+/** Bulto tal como lo devuelve la API: siempre en milímetros y gramos. */
+export interface ProductPackage {
+  seq: number;
+  heightMm: number;
+  widthMm: number;
+  lengthMm: number;
+  weightG: number;
+}
+
+export const LENGTH_UNITS = ["mm", "cm", "m", "in"] as const;
+export const MASS_UNITS = ["g", "kg", "lb", "oz"] as const;
+export type LengthUnit = (typeof LENGTH_UNITS)[number];
+export type MassUnit = (typeof MASS_UNITS)[number];
+
+/** Alícuotas de IVA vigentes en Argentina, como fracción. */
+export const IVA_RATES = [0, 0.105, 0.21, 0.27] as const;
+
 export interface MerchantProfile {
   id: string;
   tradeName: string;
@@ -183,12 +216,20 @@ export interface MerchantProfile {
   commissionPercent: number;
   absorbsInstallmentCost: boolean;
   settlementDays: number;
+  /** Las declaradas por la plataforma, a nivel rama. */
   categories: string[];
+  /** Esas mismas ya expandidas a todas sus hojas: donde puede publicar. */
+  allowedCategories: string[];
 }
 
 export interface MerchantProduct {
   id: string;
   sku: string;
+  ivaRate?: number;
+  secondCategory?: string | null;
+  brandId?: number | null;
+  brandName?: string | null;
+  packages?: ProductPackage[];
   name: string;
   description: string;
   price: number;

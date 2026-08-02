@@ -40,6 +40,14 @@ merchantRouter.get("/profile", async (req, res, next) => {
     );
     if (!rows[0]) throw new HttpError(404, "Comercio no encontrado");
     const m = rows[0];
+    // Habilitar un nodo habilita su rama entera (ver migración 005), así que
+    // el panel necesita las hojas resueltas para poder ofrecerlas en el alta.
+    const { rows: permitidas } = await pool.query(
+      `SELECT DISTINCT d.id
+       FROM merchant_categories mc, categorias_descendientes(mc.category_id) d
+       WHERE mc.merchant_id = $1`,
+      [miComercio(req)]
+    );
     res.json({
       id: m.id, tradeName: m.trade_name, legalName: m.legal_name, taxId: m.tax_id,
       status: m.status,
@@ -48,6 +56,8 @@ merchantRouter.get("/profile", async (req, res, next) => {
       absorbsInstallmentCost: m.absorbs_installment_cost,
       settlementDays: m.settlement_days,
       categories: m.categories,
+      // Todas las categorías donde puede publicar, ya expandidas.
+      allowedCategories: permitidas.map((c) => c.id),
     });
   } catch (err) {
     next(err);
@@ -94,11 +104,21 @@ merchantRouter.get("/products", async (req, res, next) => {
     }).parse(req.query);
 
     const { rows } = await pool.query(
-      `SELECT *, COUNT(*) OVER () AS total FROM products
-       WHERE merchant_id = $1
-         AND ($2::text IS NULL OR name ILIKE '%' || $2 || '%' OR sku ILIKE '%' || $2 || '%')
-         AND ($3::boolean IS NULL OR active = $3)
-       ORDER BY updated_at DESC LIMIT $4 OFFSET $5`,
+      `SELECT p.*, b.name AS brand_name,
+              COUNT(*) OVER () AS total,
+              -- Los bultos se traen con el producto: el panel los edita en la
+              -- misma pantalla y pedirlos aparte sería una request por fila.
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                         'seq', pk.seq, 'heightMm', pk.height_mm, 'widthMm', pk.width_mm,
+                         'lengthMm', pk.length_mm, 'weightG', pk.weight_g) ORDER BY pk.seq)
+                FROM product_packages pk WHERE pk.product_id = p.id), '[]') AS packages
+       FROM products p
+       LEFT JOIN brands b ON b.id = p.brand_id
+       WHERE p.merchant_id = $1
+         AND ($2::text IS NULL OR p.name ILIKE '%' || $2 || '%' OR p.sku ILIKE '%' || $2 || '%')
+         AND ($3::boolean IS NULL OR p.active = $3)
+       ORDER BY p.updated_at DESC LIMIT $4 OFFSET $5`,
       [miComercio(req), q.search ?? null, q.active === undefined ? null : q.active === "true",
        q.limit, q.offset]
     );

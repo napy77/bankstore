@@ -315,6 +315,65 @@ catalogRouter.get("/banks", async (_req, res, next) => {
   }
 });
 
+
+/**
+ * GET /api/catalog/categories/tree
+ * El árbol anidado, para los selects en cascada del panel. Se devuelve entero
+ * —son decenas de nodos, no miles— así que el panel puede armar la cascada sin
+ * una request por nivel.
+ */
+catalogRouter.get("/categories/tree", async (_req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, name, parent_id, sort_order FROM product_categories
+       WHERE active ORDER BY sort_order, name`
+    );
+    interface Nodo { id: string; name: string; children: Nodo[] }
+    const porId = new Map<string, Nodo>(
+      rows.map((r) => [r.id, { id: r.id, name: r.name, children: [] }])
+    );
+    const raices: Nodo[] = [];
+    for (const r of rows) {
+      const nodo = porId.get(r.id)!;
+      // Un padre inexistente no debería pasar (hay FK), pero si pasara el nodo
+      // queda como raíz en lugar de desaparecer del árbol.
+      const padre = r.parent_id ? porId.get(r.parent_id) : undefined;
+      if (padre) padre.children.push(nodo);
+      else raices.push(nodo);
+    }
+    res.json(raices);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/catalog/brands?search=…
+ * El catálogo tiene miles de marcas: no entra en un select, se busca.
+ */
+catalogRouter.get("/brands", async (req, res, next) => {
+  try {
+    const q = z.object({
+      search: z.string().max(80).optional(),
+      limit: z.coerce.number().int().min(1).max(50).default(20),
+    }).parse(req.query);
+
+    const { rows } = await pool.query(
+      `SELECT id, name, needs_review FROM brands
+       WHERE active AND ($1::text IS NULL OR name ILIKE $1 || '%' OR name ILIKE '%' || $1 || '%')
+       ORDER BY
+         -- Las que empiezan con lo tipeado van primero: buscando "sam" se
+         -- espera Samsung antes que "Balsam".
+         (name ILIKE $1 || '%') DESC, needs_review, name
+       LIMIT $2`,
+      [q.search ?? null, q.limit]
+    );
+    res.json(rows.map((b) => ({ id: b.id, name: b.name, needsReview: b.needs_review })));
+  } catch (err) {
+    next(err);
+  }
+});
+
 /** GET /api/catalog/categories */
 catalogRouter.get("/categories", async (_req, res, next) => {
   try {
