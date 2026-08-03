@@ -3,7 +3,7 @@ import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { pool } from "../db.js";
 import { HttpError } from "../middleware/error.js";
-import { signToken } from "../middleware/auth.js";
+import { signToken, requireAuth } from "../middleware/auth.js";
 
 export const authRouter = Router();
 
@@ -65,24 +65,22 @@ authRouter.post("/login", async (req, res, next) => {
   }
 });
 
-/** GET /api/auth/me — para que el frontend valide el token guardado. */
-authRouter.get("/me", async (req, res, next) => {
+/**
+ * GET /api/auth/me — para que el frontend valide el token guardado.
+ *
+ * Usa requireAuth y no una verificación propia: tener dos implementaciones del
+ * mismo chequeo garantiza que tarde o temprano se separen, y de hecho pasó —
+ * este endpoint rechazaba tokens que el resto de la API aceptaba.
+ */
+authRouter.get("/me", requireAuth, async (req, res, next) => {
   try {
-    const header = req.headers.authorization;
-    if (!header?.startsWith("Bearer ")) throw new HttpError(401, "Token requerido");
-    const { verify } = await import("jsonwebtoken");
-    const { config } = await import("../config.js");
-    const { CUSTOMER_AUDIENCE } = await import("../middleware/auth.js");
-    const payload = verify(header.slice(7), config.jwtSecret, {
-      audience: CUSTOMER_AUDIENCE,
-    }) as { userId: number };
-    const { rows } = await pool.query("SELECT id, email, name FROM users WHERE id = $1", [
-      payload.userId,
-    ]);
+    const { rows } = await pool.query(
+      "SELECT id, email, name FROM users WHERE id = $1",
+      [req.auth.userId]
+    );
     if (!rows[0]) throw new HttpError(401, "La cuenta ya no existe");
     res.json(rows[0]);
   } catch (err) {
-    if (err instanceof HttpError) return next(err);
-    next(new HttpError(401, "Token inválido o expirado"));
+    next(err);
   }
 });

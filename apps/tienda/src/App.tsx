@@ -1,8 +1,31 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { INITIAL_CARDS } from './data/banks';
-import { fetchProducts, fetchBanks, fetchCategories, type Category } from './api';
+import {
+  fetchProducts, fetchBanks, fetchCategories, fetchCards, addCard, me, logout,
+  type Category, type Customer, type ApiCard, getToken,
+} from './api';
+import { AuthModal } from './components/AuthModal';
 import type { Bank } from './types';
+
+/**
+ * La API devuelve la tarjeta con id numérico; los componentes del prototipo
+ * esperan `CreditCard` con id string. Se traduce acá, en un solo lugar.
+ */
+function aTarjeta(c: ApiCard): CreditCard {
+  return {
+    id: String(c.id),
+    holderName: c.holderName,
+    cardNumber: c.cardNumber,
+    expiryDate: c.expiryDate,
+    brand: c.brand,
+    tier: c.tier,
+    bankId: c.bankId,
+    bankName: c.bankName,
+    limit: c.limit,
+    availableLimit: c.availableLimit,
+    colorTheme: c.colorTheme as CreditCard['colorTheme'],
+  };
+}
 import { CardWalletSection } from './components/CardWalletSection';
 import { ProductCard } from './components/ProductCard';
 import { ProductDetailsModal } from './components/ProductDetailsModal';
@@ -42,8 +65,14 @@ const SORT_API: Record<string, 'relevance' | 'price_asc' | 'price_desc' | 'disco
 
 export default function App() {
   // --- STATE ---
-  const [cards, setCards] = useState<CreditCard[]>(INITIAL_CARDS);
-  const [selectedCard, setSelectedCard] = useState<CreditCard | null>(INITIAL_CARDS[0]);
+  // --- SESIÓN ---
+  const [user, setUser] = useState<Customer | null>(null);
+  const [checkingSession, setCheckingSession] = useState<boolean>(Boolean(getToken()));
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authMotivo, setAuthMotivo] = useState<string | undefined>();
+
+  const [cards, setCards] = useState<CreditCard[]>([]);
+  const [selectedCard, setSelectedCard] = useState<CreditCard | null>(null);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [activeCategory, setActiveCategory] = useState<string>('all');
 
@@ -70,10 +99,20 @@ export default function App() {
     setSelectedCard(card);
   };
 
-  const handleAddCard = (newCard: CreditCard) => {
-    setCards((prev) => [newCard, ...prev]);
-    // Automatically select the newly added card
-    setSelectedCard(newCard);
+  /**
+   * Vincula una tarjeta. El número completo viaja una sola vez al servidor,
+   * que lo valida con Luhn y se queda con los últimos cuatro; nunca vuelve ni
+   * queda guardado acá.
+   */
+  const handleAddCard = async (datos: Omit<Parameters<typeof addCard>[0], 'displayName'>) => {
+    // El nombre comercial del producto bancario ("Galicia Eminent") se arma
+    // con el banco y el rango: es lo que se muestra en la tarjeta.
+    const banco = banks.find((b) => b.id === datos.bankId)?.name ?? 'Banco';
+    const rango = datos.tier.charAt(0).toUpperCase() + datos.tier.slice(1);
+    const creada = await addCard({ ...datos, displayName: `${banco} ${rango}` });
+    const tarjeta = aTarjeta(creada);
+    setCards((prev) => [tarjeta, ...prev]);
+    setSelectedCard(tarjeta);
   };
 
   const handleAddToCart = (product: Product, quantity: number = 1) => {
@@ -117,20 +156,43 @@ export default function App() {
     setCart([]); // Clear cart
   };
 
-  const handleUpdateCardLimit = (cardId: string, purchaseAmount: number) => {
-    setCards((prev) =>
-      prev.map((card) =>
-        card.id === cardId
-          ? { ...card, availableLimit: card.availableLimit - purchaseAmount }
-          : card
-      )
-    );
-    // Sync current active card
-    setSelectedCard((prev) =>
-      prev && prev.id === cardId
-        ? { ...prev, availableLimit: prev.availableLimit - purchaseAmount }
-        : prev
-    );
+
+  // --- SESIÓN Y BILLETERA ---
+  // Se revalida el token guardado contra el backend: que exista en
+  // localStorage no significa que siga siendo válido.
+  useEffect(() => {
+    if (!getToken()) return;
+    me()
+      .then(setUser)
+      .catch(() => { /* vencido: el cliente ya lo limpió */ })
+      .finally(() => setCheckingSession(false));
+  }, []);
+
+  const recargarTarjetas = React.useCallback(() => {
+    if (!user) { setCards([]); setSelectedCard(null); return; }
+    fetchCards()
+      .then((api) => {
+        const mapeadas = api.map(aTarjeta);
+        setCards(mapeadas);
+        // Se conserva la elegida si sigue existiendo; si no, la primera.
+        setSelectedCard((prev) => {
+          const sigue = prev && mapeadas.find((c) => c.id === prev.id);
+          return sigue ?? mapeadas[0] ?? null;
+        });
+      })
+      .catch(() => { setCards([]); setSelectedCard(null); });
+  }, [user]);
+
+  useEffect(() => { recargarTarjetas(); }, [recargarTarjetas]);
+
+  /** Abre el login explicando por qué hace falta. */
+  const pedirLogin = (motivo?: string) => { setAuthMotivo(motivo); setAuthOpen(true); };
+
+  const cerrarSesion = () => {
+    logout();
+    setUser(null);
+    setCart([]);
+    setPurchaseHistory([]);
   };
 
   // --- CARGA DEL CATÁLOGO ---
@@ -232,6 +294,34 @@ export default function App() {
               </span>
             )}
           </button>
+
+          {/* Sesión */}
+          {checkingSession ? (
+            <div className="w-24 h-9 bg-slate-100 rounded-full animate-pulse" />
+          ) : user ? (
+            <div className="flex items-center gap-2">
+              <div className="hidden md:block text-right leading-tight">
+                <span className="block text-xs font-bold text-slate-800">{user.name}</span>
+                <button
+                  type="button" onClick={cerrarSesion}
+                  className="text-[10px] text-slate-400 hover:text-rose-600 transition-colors"
+                >
+                  Cerrar sesión
+                </button>
+              </div>
+              <div className="w-9 h-9 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center font-bold text-xs shrink-0">
+                {user.name.split(' ').map((p) => p[0]).slice(0, 2).join('').toUpperCase()}
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => pedirLogin()}
+              className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-4 py-2.5 rounded-full shadow-md shadow-blue-600/15 transition-all"
+            >
+              Ingresar
+            </button>
+          )}
         </div>
       </nav>
 
@@ -260,11 +350,13 @@ export default function App() {
 
         {/* 3. Card Wallet Controller */}
         <CardWalletSection
-            banks={banks}
+          banks={banks}
           cards={cards}
           selectedCard={selectedCard}
           onSelectCard={handleSelectCard}
           onAddCard={handleAddCard}
+          isLoggedIn={Boolean(user)}
+          onRequestLogin={() => pedirLogin('Entrá para ver y vincular tus tarjetas.')}
         />
 
         {/* 4. Filters & Search Controls */}
@@ -449,6 +541,15 @@ export default function App() {
         onUpdateQuantity={handleUpdateQuantity}
         onCheckout={() => {
           setIsCartOpen(false);
+          // Comprar necesita cuenta: la orden se crea contra el usuario.
+          if (!user) { pedirLogin('Entrá para completar tu compra.'); return; }
+          if (cards.length === 0) {
+            // Ya tiene sesión: lo que falta es la tarjeta, así que se lo lleva
+            // a la billetera en vez de mostrarle un login que no resuelve nada.
+            document.getElementById('card-wallet-section')
+              ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            return;
+          }
           setIsCheckoutOpen(true);
         }}
       />
@@ -463,7 +564,7 @@ export default function App() {
         selectedCard={selectedCard}
         onSelectCard={handleSelectCard}
         onCompletePurchase={handleCompletePurchase}
-        onUpdateCardLimit={handleUpdateCardLimit}
+        onOrderPlaced={() => { recargarTarjetas(); setCart([]); }}
       />
 
       {/* Isolated Invoice ticket popup */}
@@ -559,6 +660,13 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+
+      <AuthModal
+        isOpen={authOpen}
+        motivo={authMotivo}
+        onClose={() => setAuthOpen(false)}
+        onAuth={(u) => { setUser(u); setAuthOpen(false); setAuthMotivo(undefined); }}
+      />
 
     </div>
   );

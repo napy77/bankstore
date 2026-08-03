@@ -262,3 +262,180 @@ export async function simulateCart(
   if (!res.ok) throw new ApiError(res.status, data?.error ?? 'No pude calcular el carrito');
   return data as CartSimulation;
 }
+
+// ── Sesión del comprador ─────────────────────────────────────────────────────
+
+/**
+ * El token va en localStorage con una clave propia del ámbito comprador. Los
+ * paneles de back-office usan otra ('bankstore.token.staff'): son sesiones
+ * distintas y no tienen que pisarse si alguien abre las dos en el mismo
+ * navegador.
+ */
+const TOKEN_KEY = 'bankstore.token.customer';
+
+export function getToken(): string | null {
+  try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
+}
+
+export function setToken(token: string | null): void {
+  try {
+    if (token === null) localStorage.removeItem(TOKEN_KEY);
+    else localStorage.setItem(TOKEN_KEY, token);
+  } catch { /* Safari en privado: la sesión dura lo que la pestaña */ }
+}
+
+export interface Customer {
+  id: number;
+  email: string;
+  name: string;
+}
+
+async function authed<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const token = getToken();
+  const headers: Record<string, string> = { ...(init.headers as Record<string, string>) };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (init.body !== undefined) headers['Content-Type'] = 'application/json';
+
+  const res = await fetch(`${BASE}${path}`, { ...init, headers });
+  if (res.status === 401) {
+    // Vencido o revocado: se limpia para que la app no quede reintentando.
+    setToken(null);
+    throw new ApiError(401, 'Tu sesión expiró. Volvé a entrar.');
+  }
+  if (res.status === 204) return undefined as T;
+  const data = await res.json();
+  if (!res.ok) throw new ApiError(res.status, data?.error ?? `Error ${res.status}`);
+  return data as T;
+}
+
+export async function login(email: string, password: string): Promise<Customer> {
+  const r = await authed<{ token: string; user: Customer }>('/api/auth/login', {
+    method: 'POST', body: JSON.stringify({ email, password }),
+  });
+  setToken(r.token);
+  return r.user;
+}
+
+export async function register(name: string, email: string, password: string): Promise<Customer> {
+  const r = await authed<{ token: string; user: Customer }>('/api/auth/register', {
+    method: 'POST', body: JSON.stringify({ name, email, password }),
+  });
+  setToken(r.token);
+  return r.user;
+}
+
+/** Revalida el token guardado. No alcanza con que exista: puede haber vencido. */
+export async function me(): Promise<Customer> {
+  return authed<Customer>('/api/auth/me');
+}
+
+export function logout(): void {
+  setToken(null);
+}
+
+// ── Billetera ────────────────────────────────────────────────────────────────
+
+export interface ApiCard {
+  id: number;
+  bankId: string;
+  bankName: string;
+  holderName: string;
+  cardNumber: string;
+  last4: string;
+  brand: 'visa' | 'mastercard' | 'amex' | 'cabal';
+  tier: 'black' | 'signature' | 'platinum' | 'gold' | 'classic';
+  expiryDate: string;
+  limit: number;
+  availableLimit: number;
+  colorTheme: string;
+}
+
+export async function fetchCards(): Promise<ApiCard[]> {
+  return authed<ApiCard[]>('/api/cards');
+}
+
+export interface NuevaTarjeta {
+  cardNumber: string;
+  holderName: string;
+  expiryMonth: number;
+  expiryYear: number;
+  bankId: string;
+  displayName: string;
+  tier: string;
+  creditLimit: number;
+  colorTheme: string;
+}
+
+/**
+ * Vincula una tarjeta.
+ *
+ * El número completo se manda una sola vez: el servidor lo valida con Luhn,
+ * deduce la marca, guarda los últimos 4 y descarta el resto. Nunca queda el
+ * PAN completo en la base ni vuelve en ninguna respuesta.
+ */
+export async function addCard(t: NuevaTarjeta): Promise<ApiCard> {
+  return authed<ApiCard>('/api/cards', { method: 'POST', body: JSON.stringify(t) });
+}
+
+export async function deleteCard(id: number): Promise<void> {
+  await authed<void>(`/api/cards/${id}`, { method: 'DELETE' });
+}
+
+// ── Órdenes ──────────────────────────────────────────────────────────────────
+
+export interface ApiOrder {
+  id: number;
+  orderNumber: number;
+  date: string;
+  status: string;
+  merchants: {
+    merchantId: string;
+    merchantName: string;
+    merchantOrderNumber: number;
+    status: string;
+    subtotal: number;
+    netSubtotal: number;
+    ivaSubtotal: number;
+    items: { productId: string; productName: string; quantity: number; price: number;
+             ivaRate: number; unitPriceNet: number; ivaAmount: number }[];
+  }[];
+  items: { productId: string; productName: string; quantity: number; price: number }[];
+  cardUsed: { bankName: string; brand: string; cardNumber: string };
+  installments: number;
+  subtotal: number;
+  discountAmount: number;
+  totalAmount: number;
+  interestAmount: number;
+  installmentPrice: number;
+  reintegroAmount: number;
+  taxes: { net: number; iva: number; ivaInteres: number };
+  tna: number;
+  tea: number;
+  cft: number;
+  duplicated?: boolean;
+}
+
+/**
+ * Confirma la compra.
+ *
+ * Sólo va QUÉ se compra: el servidor recalcula precio, IVA, interés, cuota y
+ * reintegro contra la base. Nada de lo que mande el navegador afecta el monto.
+ *
+ * La clave de idempotencia evita la orden duplicada por doble click o por un
+ * reintento de red: la segunda vez devuelve la orden que ya existe.
+ */
+export async function createOrder(
+  items: { productId: string; quantity: number }[],
+  cardId: number,
+  installments: number,
+  idempotencyKey: string
+): Promise<ApiOrder> {
+  return authed<ApiOrder>('/api/orders', {
+    method: 'POST',
+    body: JSON.stringify({ items, cardId, installments, idempotencyKey }),
+  });
+}
+
+export async function fetchOrders(): Promise<Record<string, unknown>[]> {
+  return authed<Record<string, unknown>[]>('/api/orders');
+}

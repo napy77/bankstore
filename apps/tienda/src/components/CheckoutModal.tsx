@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CartItem, CreditCard, Purchase, Bank } from '../types';
 import { CardVisualizer } from './CardVisualizer';
-import { simulateCart, type CartSimulation } from '../api';
-import { X, ArrowRight, ArrowLeft, Check, CheckCircle2, ShieldCheck, Truck, DollarSign, Calendar, Landmark, MapPin, ReceiptText, ChevronRight } from 'lucide-react';
+import { simulateCart, createOrder, type CartSimulation, type ApiOrder } from '../api';
+import { X, ArrowRight, ArrowLeft, Check, CheckCircle2, ShieldCheck, Truck, DollarSign, Calendar, Landmark, MapPin, ReceiptText, ChevronRight, Loader2 } from 'lucide-react';
 
 interface CheckoutModalProps {
   isOpen: boolean;
@@ -15,7 +15,12 @@ interface CheckoutModalProps {
   selectedCard: CreditCard | null;
   onSelectCard: (card: CreditCard) => void;
   onCompletePurchase: (purchase: Purchase) => void;
-  onUpdateCardLimit: (cardId: string, purchaseAmount: number) => void;
+  /**
+   * Se llama cuando la orden se creó. El límite lo descontó el servidor, así
+   * que el padre relee la billetera en vez de restar a mano un número que
+   * puede no coincidir con el real.
+   */
+  onOrderPlaced: () => void;
 }
 
 type Step = 'review' | 'financing' | 'shipping' | 'success';
@@ -29,7 +34,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   selectedCard,
   onSelectCard,
   onCompletePurchase,
-  onUpdateCardLimit,
+  onOrderPlaced,
 }) => {
   const [step, setStep] = useState<Step>('review');
   const [installments, setInstallments] = useState<number>(3);
@@ -51,6 +56,11 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
   // Lo que devuelve el servidor para este carrito.
   const [sim, setSim] = useState<CartSimulation | null>(null);
+  const [orden, setOrden] = useState<ApiOrder | null>(null);
+  const [paying, setPaying] = useState(false);
+  const [payError, setPayError] = useState<string | null>(null);
+  /** Se genera una vez por intento de compra y se reusa al reintentar. */
+  const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null);
   const [simLoading, setSimLoading] = useState(false);
   const [simError, setSimError] = useState<string | null>(null);
 
@@ -107,47 +117,70 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     return Object.keys(errors).length === 0;
   };
 
-  // Final payment handler
-  const handleFinalPayment = () => {
-    if (!selectedCard) return;
+  /**
+   * Confirma la compra contra el servidor.
+   *
+   * Sólo se manda QUÉ se compra: producto, cantidad, tarjeta y cuotas. El
+   * precio, el IVA, el interés y el reintegro los recalcula el backend contra
+   * la base, así que nada de lo que esté en este navegador afecta el monto.
+   *
+   * La clave de idempotencia se genera UNA vez por intento y se reusa si hay
+   * que reintentar: es lo que evita la orden duplicada por doble click o por
+   * un corte de red justo después de que el servidor ya la creó.
+   */
+  const handleFinalPayment = async () => {
+    if (!selectedCard || paying) return;
 
-    if (selectedCard.availableLimit < totalFinancedAmount) {
-      setFormErrors({ card: 'Límite insuficiente en la tarjeta de crédito seleccionada.' });
-      return;
+    setPaying(true);
+    setPayError(null);
+
+    const clave = idempotencyKey ?? `chk-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    if (!idempotencyKey) setIdempotencyKey(clave);
+
+    try {
+      const orden = await createOrder(
+        cart.map((i) => ({ productId: i.product.id, quantity: i.quantity })),
+        Number(selectedCard.id),
+        installments,
+        clave
+      );
+
+      const purchase: Purchase = {
+        id: `#${orden.orderNumber}`,
+        date: new Date(orden.date).toLocaleDateString('es-AR', {
+          day: '2-digit', month: '2-digit', year: 'numeric',
+          hour: '2-digit', minute: '2-digit',
+        }),
+        items: orden.items.map((i) => ({
+          productId: i.productId,
+          productName: i.productName,
+          price: i.price,
+          quantity: i.quantity,
+        })),
+        totalAmount: orden.totalAmount,
+        cardUsed: {
+          bankName: orden.cardUsed.bankName,
+          brand: orden.cardUsed.brand as Purchase['cardUsed']['brand'],
+          cardNumber: orden.cardUsed.cardNumber,
+        },
+        installments: orden.installments,
+        installmentPrice: orden.installmentPrice,
+        cft: orden.cft * 100,
+        reintegroAmount: orden.reintegroAmount,
+      };
+
+      setOrden(orden);
+      setReceipt(purchase);
+      onCompletePurchase(purchase);
+      // El límite lo descontó el servidor: se relee para no mostrar un número
+      // calculado a mano que puede diferir del real.
+      onOrderPlaced();
+      setStep('success');
+    } catch (err) {
+      setPayError(err instanceof Error ? err.message : 'No pudimos procesar la compra');
+    } finally {
+      setPaying(false);
     }
-
-    const uniqueId = `TKT-${Math.floor(100000 + Math.random() * 900000)}`;
-    const newPurchase: Purchase = {
-      id: uniqueId,
-      date: new Date().toLocaleDateString('es-AR', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      }),
-      items: cart.map((item) => ({
-        productId: item.product.id,
-        productName: item.product.name,
-        price: item.product.price,
-        quantity: item.quantity,
-      })),
-      totalAmount: totalFinancedAmount,
-      cardUsed: {
-        bankName: selectedCard.bankName,
-        brand: selectedCard.brand,
-        cardNumber: selectedCard.cardNumber,
-      },
-      installments,
-      installmentPrice: monthlyInstallment,
-      cft,
-      reintegroAmount,
-    };
-
-    onUpdateCardLimit(selectedCard.id, totalFinancedAmount);
-    onCompletePurchase(newPurchase);
-    setReceipt(newPurchase);
-    setStep('success');
   };
 
   return (
@@ -464,6 +497,13 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                   exit={{ opacity: 0, x: 10 }}
                   className="space-y-4"
                 >
+                  {payError && (
+                    <div className="bg-rose-50 border border-rose-100 rounded-2xl p-3.5 text-xs text-rose-700">
+                      <strong className="block font-bold mb-0.5">No pudimos procesar la compra</strong>
+                      {payError}
+                    </div>
+                  )}
+
                   <div className="bg-emerald-50/50 border border-emerald-100 rounded-2xl p-4 flex gap-3 text-xs text-slate-600">
                     <Truck size={20} className="text-emerald-600 mt-0.5 shrink-0" />
                     <p className="leading-relaxed">
@@ -675,15 +715,17 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                 <button
                   type="button"
                   id="checkout-pay-btn"
+                  disabled={paying}
                   onClick={() => {
                     if (validateShippingForm()) {
                       handleFinalPayment();
                     }
                   }}
-                  className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs uppercase tracking-wider rounded-full flex items-center gap-1.5 shadow-md shadow-blue-600/10 cursor-pointer transition-all"
+                  className="px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 disabled:cursor-wait text-white font-bold text-xs uppercase tracking-wider rounded-full flex items-center gap-1.5 shadow-md shadow-blue-600/10 cursor-pointer transition-all"
                 >
-                  <ShieldCheck size={16} strokeWidth={2.5} />
-                  Pagar Ahora • ${totalFinancedAmount.toLocaleString('es-AR', { maximumFractionDigits: 0 })}
+                  {paying
+                    ? <><Loader2 size={16} className="animate-spin" /> Procesando…</>
+                    : <><ShieldCheck size={16} strokeWidth={2.5} /> Pagar Ahora • ${totalFinancedAmount.toLocaleString('es-AR', { maximumFractionDigits: 0 })}</>}
                 </button>
               )}
             </div>
