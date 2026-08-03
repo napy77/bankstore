@@ -214,3 +214,51 @@ export async function simulate(
   if (!res.ok) throw new ApiError(res.status, data?.error ?? 'No pude simular las cuotas');
   return data as Simulation;
 }
+
+// ── Carrito ──────────────────────────────────────────────────────────────────
+
+export interface CartSimulation {
+  items: {
+    productId: string;
+    name: string;
+    quantity: number;
+    unitPrice: number;
+    unitPriceNet: number;
+    ivaRate: number;
+    lineTotal: number;
+    lineNet: number;
+    lineIva: number;
+    merchant: { id: string; name: string };
+  }[];
+  maxInterestFree: number;
+  options: number[];
+  quote: Simulation['quote'];
+  taxes: { net: number; iva: number; ivaInteres: number };
+  reintegro: number;
+}
+
+/**
+ * El carrito entero calculado por el servidor: cuotas, IVA discriminado y
+ * reintegro. Es la misma cuenta que hace el checkout, así que lo que se le
+ * muestra al comprador antes de pagar es exactamente lo que va a pagar.
+ *
+ * El desglose de impuestos no es un adorno: la transparencia fiscal al
+ * consumidor obliga a informarlo en el momento de la venta, no sólo en el
+ * comprobante posterior.
+ */
+export async function simulateCart(
+  items: { productId: string; quantity: number }[],
+  bankId: string,
+  installments?: number,
+  signal?: AbortSignal
+): Promise<CartSimulation> {
+  const res = await fetch(`${BASE}/api/catalog/simulate-cart`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items, bankId, installments }),
+    signal,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new ApiError(res.status, data?.error ?? 'No pude calcular el carrito');
+  return data as CartSimulation;
+}

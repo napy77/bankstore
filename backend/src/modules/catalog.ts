@@ -4,7 +4,9 @@ import { pool } from "../db.js";
 import { HttpError } from "../middleware/error.js";
 import { config } from "../config.js";
 import { quote, availableInstallments } from "../lib/installments.js";
-import { resolveBenefit, type AgreementRow, type ProductOfferRow } from "../lib/agreements.js";
+import { applyCaps, resolveBenefit, type AgreementRow, type ProductOfferRow } from "../lib/agreements.js";
+import { breakdown } from "../lib/units.js";
+import { round2 } from "../lib/money.js";
 
 export const catalogRouter = Router();
 
@@ -32,6 +34,7 @@ interface ProductRow {
   stock: number;
   specs: string[];
   features: string[];
+  iva_rate: number;
 }
 
 const PUBLICABLE = "p.active AND m.status = 'active'";
@@ -119,6 +122,9 @@ function serializePublic(p: ProductRow) {
     originalPrice: p.original_price,
     category: p.category_id,
     kind: p.kind,
+    // La alícuota va en el catálogo público: la tienda tiene que poder
+    // mostrar el desglose antes de que el comprador llegue al checkout.
+    ivaRate: Number(p.iva_rate),
     merchant: { id: p.merchant_id, name: p.trade_name },
     rating: p.rating,
     reviewsCount: p.reviews_count,
@@ -369,6 +375,102 @@ catalogRouter.get("/brands", async (req, res, next) => {
       [q.search ?? null, q.limit]
     );
     res.json(rows.map((b) => ({ id: b.id, name: b.name, needsReview: b.needs_review })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+/**
+ * POST /api/catalog/simulate-cart
+ *
+ * El carrito entero: cuotas, IVA discriminado y reintegro. Es la MISMA cuenta
+ * que hace el checkout, expuesta sin login para que la tienda pueda mostrarle
+ * al comprador cuánto del precio es impuesto antes de que pague — que es
+ * cuando la transparencia fiscal exige informarlo, no recién en el
+ * comprobante.
+ */
+const simulateCartSchema = z.object({
+  items: z.array(z.object({
+    productId: z.string(),
+    quantity: z.coerce.number().int().min(1).max(20),
+  })).min(1).max(30),
+  bankId: z.string(),
+  installments: z.coerce.number().int().min(1).max(24).optional(),
+});
+
+catalogRouter.post("/simulate-cart", async (req, res, next) => {
+  try {
+    const body = simulateCartSchema.parse(req.body);
+    const ids = body.items.map((i) => i.productId);
+
+    const { rows: products } = await pool.query<ProductRow>(
+      `SELECT p.*, m.trade_name FROM products p JOIN merchants m ON m.id = p.merchant_id
+       WHERE p.id = ANY($1) AND ${PUBLICABLE}`,
+      [ids]
+    );
+    if (products.length !== new Set(ids).size) {
+      throw new HttpError(400, "Alguno de los productos ya no está disponible");
+    }
+    const byId = new Map(products.map((p) => [p.id, p]));
+
+    const agreements = await activeAgreements();
+    const offers = await offersFor(ids);
+
+    let total = 0;
+    let neto = 0;
+    let maxInterestFree = Infinity;
+    const reintegroLines: { capKey: string; amount: number; capAmount: number | null }[] = [];
+    const detalle = body.items.map((item) => {
+      const p = byId.get(item.productId)!;
+      const lineTotal = round2(p.price * item.quantity);
+      const ivaRate = Number(p.iva_rate);
+      const unit = breakdown(p.price, ivaRate);
+      const lineNet = round2(unit.net * item.quantity);
+
+      total = round2(total + lineTotal);
+      neto = round2(neto + lineNet);
+
+      const benefit = resolveBenefit(
+        body.bankId, p.merchant_id, p.category_id,
+        offers.get(p.id)?.find((o) => o.bank_id === body.bankId),
+        agreements
+      );
+      maxInterestFree = Math.min(maxInterestFree, benefit.maxCuotas);
+      reintegroLines.push({
+        capKey: benefit.capKey,
+        amount: round2(lineTotal * benefit.reintegroPercent),
+        capAmount: benefit.capAmount,
+      });
+
+      return {
+        productId: p.id, name: p.name, quantity: item.quantity,
+        unitPrice: p.price, unitPriceNet: unit.net, ivaRate,
+        lineTotal, lineNet, lineIva: round2(lineTotal - lineNet),
+        merchant: { id: p.merchant_id, name: p.trade_name },
+      };
+    });
+    if (maxInterestFree === Infinity) maxInterestFree = 1;
+
+    const installments = body.installments ?? Math.max(maxInterestFree, 1);
+    const result = quote({
+      amount: total, installments, maxInterestFree,
+      tna: config.finance.tnaDefault, vatRate: config.finance.ivaSobreIntereses,
+    });
+
+    res.json({
+      items: detalle,
+      maxInterestFree,
+      options: availableInstallments(maxInterestFree),
+      quote: result,
+      taxes: {
+        net: neto,
+        // Por diferencia contra el total, para que neto + IVA cierre exacto.
+        iva: round2(total - neto),
+        ivaInteres: result.vatAmount,
+      },
+      reintegro: applyCaps(reintegroLines),
+    });
   } catch (err) {
     next(err);
   }

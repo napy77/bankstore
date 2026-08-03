@@ -6,6 +6,7 @@ import { config } from "../config.js";
 import { quote } from "../lib/installments.js";
 import { applyCaps, resolveBenefit, type AgreementRow, type ProductOfferRow } from "../lib/agreements.js";
 import { round2 } from "../lib/money.js";
+import { breakdown } from "../lib/units.js";
 
 export const ordersRouter = Router();
 
@@ -47,6 +48,7 @@ interface ProductoConComercio {
   original_price: number | null;
   category_id: string;
   stock: number;
+  iva_rate: number;
   merchant_id: string;
   merchant_status: string;
   trade_name: string;
@@ -58,7 +60,12 @@ interface ProductoConComercio {
 interface LineaResuelta {
   product: ProductoConComercio;
   quantity: number;
+  /** Total de la línea a precio final, con IVA. */
   lineTotal: number;
+  /** Desglose congelado al momento de la venta. */
+  ivaRate: number;
+  unitNet: number;
+  lineIva: number;
   maxCuotas: number;
 }
 
@@ -103,7 +110,8 @@ ordersRouter.post("/", async (req, res, next) => {
     // Sólo se puede comprar de comercios activos: uno suspendido no vende
     // aunque su catálogo siga publicado.
     const { rows: products } = await client.query<ProductoConComercio>(
-      `SELECT p.id, p.name, p.price, p.original_price, p.category_id, p.stock, p.merchant_id,
+      `SELECT p.id, p.name, p.price, p.original_price, p.category_id, p.stock, p.iva_rate,
+              p.merchant_id,
               m.status AS merchant_status, m.trade_name, m.commission_percent,
               m.absorbs_installment_cost, m.settlement_days
        FROM products p JOIN merchants m ON m.id = p.merchant_id
@@ -173,7 +181,21 @@ ordersRouter.post("/", async (req, res, next) => {
         capAmount: benefit.capAmount,
       });
 
-      lineas.push({ product, quantity: item.quantity, lineTotal, maxCuotas: benefit.maxCuotas });
+      // El desglose se calcula acá y se congela: la alícuota del producto
+      // puede cambiar mañana y el comprobante tiene que seguir igual.
+      const ivaRate = Number(product.iva_rate);
+      const unitario = breakdown(product.price, ivaRate);
+      const unitNet = unitario.net;
+      // El IVA de la línea es por diferencia contra el total final, no
+      // multiplicando el IVA unitario: así neto + IVA da exactamente el total,
+      // sin un centavo de arrastre por redondear en cada unidad.
+      const lineIva = round2(lineTotal - unitNet * item.quantity);
+
+      lineas.push({
+        product, quantity: item.quantity, lineTotal,
+        ivaRate, unitNet, lineIva,
+        maxCuotas: benefit.maxCuotas,
+      });
     }
     if (maxInterestFree === Infinity) maxInterestFree = 1;
 
@@ -194,6 +216,11 @@ ordersRouter.post("/", async (req, res, next) => {
     }
 
     const reintegro = applyCaps(reintegroLines);
+
+    // Totales fiscales. El neto sale de sumar las líneas y el IVA por
+    // diferencia contra el total, para que neto + IVA cierre exacto.
+    const netoTotal = round2(lineas.reduce((a, l) => a + l.unitNet * l.quantity, 0));
+    const ivaTotal = round2(saleTotal - netoTotal);
 
     // ── Reparto por comercio ─────────────────────────────────────────────────
     // El costo de las cuotas sin interés se prorratea según cuánto puso cada
@@ -242,8 +269,9 @@ ordersRouter.post("/", async (req, res, next) => {
       `INSERT INTO orders (order_number, user_id, card_id, bank_id, bank_name, card_brand, card_last4,
                            installments, subtotal, discount_amount, total_amount, interest_amount,
                            installment_amount, reintegro_amount, tna, tea, cft,
-                           idempotency_key, merchant_count)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+                           idempotency_key, merchant_count,
+                           net_amount, iva_amount, iva_interes_amount)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
        RETURNING id`,
       [
         next_number, userId, card.id, card.bank_id, card.bank_name, card.brand, card.last4,
@@ -251,6 +279,10 @@ ordersRouter.post("/", async (req, res, next) => {
         financing.interestAmount, financing.installmentAmount, reintegro,
         financing.tna, financing.tea, financing.cft, body.idempotencyKey ?? null,
         porComercio.size,
+        netoTotal, ivaTotal,
+        // El IVA del crédito es otro hecho imponible: no es el del producto,
+        // es el de la financiación. Ya se calculaba para el CFT.
+        financing.vatAmount,
       ]
     );
 
@@ -260,6 +292,9 @@ ordersRouter.post("/", async (req, res, next) => {
       const merchant = grupo.lineas[0]!.product;
       const commissionPercent = Number(merchant.commission_percent);
       const commissionAmount = round2(grupo.subtotal * commissionPercent);
+
+      const netoComercio = round2(grupo.lineas.reduce((a, l) => a + l.unitNet * l.quantity, 0));
+      const ivaComercio = round2(grupo.subtotal - netoComercio);
 
       const participacion = saleTotal === 0 ? 0 : grupo.subtotal / saleTotal;
       const installmentCost = merchant.absorbs_installment_cost
@@ -280,19 +315,22 @@ ordersRouter.post("/", async (req, res, next) => {
         rows: [mo],
       } = await client.query(
         `INSERT INTO merchant_orders (order_id, merchant_id, merchant_order_number, subtotal,
+                                      net_subtotal, iva_subtotal,
                                       commission_percent, commission_amount, installment_cost,
                                       payout_amount, settlement_date)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8, CURRENT_DATE + $9::int)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, CURRENT_DATE + $11::int)
          RETURNING id`,
-        [order.id, merchantId, next_mo, grupo.subtotal, commissionPercent, commissionAmount,
-         installmentCost, payout, merchant.settlement_days]
+        [order.id, merchantId, next_mo, grupo.subtotal, netoComercio, ivaComercio,
+         commissionPercent, commissionAmount, installmentCost, payout, merchant.settlement_days]
       );
 
       for (const linea of grupo.lineas) {
         await client.query(
-          `INSERT INTO order_items (order_id, merchant_order_id, product_id, product_name, quantity, unit_price)
-           VALUES ($1,$2,$3,$4,$5,$6)`,
-          [order.id, mo.id, linea.product.id, linea.product.name, linea.quantity, linea.product.price]
+          `INSERT INTO order_items (order_id, merchant_order_id, product_id, product_name,
+                                    quantity, unit_price, iva_rate, unit_price_net, iva_amount)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [order.id, mo.id, linea.product.id, linea.product.name, linea.quantity,
+           linea.product.price, linea.ivaRate, linea.unitNet, linea.lineIva]
         );
       }
     }
@@ -329,10 +367,13 @@ async function getOrder(orderId: number, userId: number) {
   // El comprador ve una sola compra, pero agrupada por comercio: es lo que
   // necesita para saber quién le despacha cada cosa.
   const { rows: grupos } = await pool.query(
-    `SELECT mo.id, mo.merchant_id, m.trade_name, mo.merchant_order_number, mo.status, mo.subtotal,
+    `SELECT mo.id, mo.merchant_id, m.trade_name, mo.merchant_order_number, mo.status,
+            mo.subtotal, mo.net_subtotal, mo.iva_subtotal,
             COALESCE(json_agg(json_build_object(
               'productId', i.product_id, 'productName', i.product_name,
-              'quantity', i.quantity, 'price', i.unit_price
+              'quantity', i.quantity, 'price', i.unit_price,
+              'ivaRate', i.iva_rate, 'unitPriceNet', i.unit_price_net,
+              'ivaAmount', i.iva_amount
             ) ORDER BY i.id) FILTER (WHERE i.id IS NOT NULL), '[]') AS items
      FROM merchant_orders mo
      JOIN merchants m ON m.id = mo.merchant_id
@@ -354,6 +395,8 @@ async function getOrder(orderId: number, userId: number) {
       merchantOrderNumber: g.merchant_order_number,
       status: g.status,
       subtotal: g.subtotal,
+      netSubtotal: g.net_subtotal,
+      ivaSubtotal: g.iva_subtotal,
       items: g.items,
     })),
     // Aplanado, para el comprobante y para quien no le interesa el corte.
@@ -367,6 +410,14 @@ async function getOrder(orderId: number, userId: number) {
     subtotal: order.subtotal,
     discountAmount: order.discount_amount,
     totalAmount: order.total_amount,
+    // Desglose fiscal, congelado al momento de la venta.
+    taxes: {
+      net: order.net_amount,
+      iva: order.iva_amount,
+      // El IVA sobre los intereses es otro hecho imponible: el del crédito,
+      // no el del producto. Va aparte para que el comprobante no los mezcle.
+      ivaInteres: order.iva_interes_amount,
+    },
     interestAmount: order.interest_amount,
     installmentPrice: order.installment_amount,
     reintegroAmount: order.reintegro_amount,

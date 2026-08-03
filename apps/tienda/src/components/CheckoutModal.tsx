@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CartItem, CreditCard, Purchase, Bank } from '../types';
 import { CardVisualizer } from './CardVisualizer';
+import { simulateCart, type CartSimulation } from '../api';
 import { X, ArrowRight, ArrowLeft, Check, CheckCircle2, ShieldCheck, Truck, DollarSign, Calendar, Landmark, MapPin, ReceiptText, ChevronRight } from 'lucide-react';
 
 interface CheckoutModalProps {
@@ -48,60 +49,53 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   // Generated purchase success receipt
   const [receipt, setReceipt] = useState<Purchase | null>(null);
 
+  // Lo que devuelve el servidor para este carrito.
+  const [sim, setSim] = useState<CartSimulation | null>(null);
+  const [simLoading, setSimLoading] = useState(false);
+  const [simError, setSimError] = useState<string | null>(null);
+
+  // Cuotas, interés, CFT, IVA discriminado y reintegro los calcula el servidor.
+  // Antes se hacían acá con fórmulas inventadas (`tna = 40 + diferencia * 2.5`,
+  // `cft = tna * 1.35`) que no coincidían con lo que después se iba a cobrar.
+  // Es además la misma cuenta que hace el checkout, así que lo que se muestra
+  // es exactamente lo que se paga.
+  useEffect(() => {
+    // El guard incluye isOpen porque este efecto vive ARRIBA del early
+    // return: los hooks tienen que ejecutarse siempre, en el mismo orden.
+    if (!isOpen || !selectedCard || cart.length === 0) { setSim(null); return; }
+    const ctrl = new AbortController();
+    setSimLoading(true);
+    setSimError(null);
+    simulateCart(
+      cart.map((i) => ({ productId: i.product.id, quantity: i.quantity })),
+      selectedCard.bankId,
+      installments,
+      ctrl.signal
+    )
+      .then(setSim)
+      .catch((err) => {
+        if (err.name === 'AbortError') return;
+        setSimError(err.message ?? 'No pude calcular el total');
+      })
+      .finally(() => { if (!ctrl.signal.aborted) setSimLoading(false); });
+    return () => ctrl.abort();
+  }, [isOpen, cart, selectedCard?.bankId, installments]);
+
   if (!isOpen) return null;
 
   const totalAmount = cart.reduce((acc, item) => acc + item.product.price * item.quantity, 0);
-
-  // Maximum interest free installments for selected card
-  const getCartMaxCuotas = () => {
-    if (!selectedCard) return 1;
-    let minMaxCuotas = 24;
-    cart.forEach((item) => {
-      const offer = item.product.bankOffers.find((o) => o.bankId === selectedCard.bankId);
-      const maxItemCuotas = offer ? offer.maxCuotas : 1;
-      if (maxItemCuotas < minMaxCuotas) {
-        minMaxCuotas = maxItemCuotas;
-      }
-    });
-    return minMaxCuotas === 24 ? 1 : minMaxCuotas;
-  };
-
-  const maxCuotas = getCartMaxCuotas();
-  const isInterestFree = installments <= maxCuotas;
-
-  // Surcharges if going beyond maximum interest free cuotas
-  const getFinancingRates = () => {
-    if (isInterestFree) {
-      return { surchargePercent: 0, cft: 0 };
-    }
-    const difference = installments - maxCuotas;
-    const tna = 40 + difference * 2.5;
-    const surchargePercent = (tna / 12) * installments * 0.45;
-    const cft = tna * 1.35;
-    return { surchargePercent, cft };
-  };
-
-  const { surchargePercent, cft } = getFinancingRates();
-  const totalFinancedAmount = totalAmount * (1 + surchargePercent / 100);
-  const monthlyInstallment = totalFinancedAmount / installments;
-
-  // Selected Card Promos / Savings
   const currentBank = selectedCard ? banks.find((b) => b.id === selectedCard.bankId) : null;
-  const getEstimatedReintegro = () => {
-    if (!selectedCard || !currentBank) return 0;
-    let totalDiscount = 0;
-    cart.forEach((item) => {
-      const promo = currentBank.promos.find((p) => p.category === item.product.category);
-      const offer = item.product.bankOffers.find((o) => o.bankId === selectedCard.bankId);
-      const discountPercent = offer?.discountPercent || promo?.discountPercent || 0;
-      const capAmount = promo?.capAmount || 0;
-      const discountAmount = Math.min((item.product.price * item.quantity * discountPercent) / 100, capAmount || Infinity);
-      totalDiscount += discountAmount;
-    });
-    return totalDiscount;
-  };
 
-  const reintegroAmount = getEstimatedReintegro();
+  const maxCuotas = sim?.maxInterestFree ?? 1;
+  const isInterestFree = sim ? sim.quote.interestFree : true;
+  const cft = (sim?.quote.cft ?? 0) * 100;
+  const surchargePercent = sim && totalAmount > 0
+    ? ((sim.quote.totalAmount - totalAmount) / totalAmount) * 100
+    : 0;
+  const totalFinancedAmount = sim?.quote.totalAmount ?? totalAmount;
+  const monthlyInstallment = sim?.quote.installmentAmount ?? totalAmount / installments;
+
+  const reintegroAmount = sim?.reintegro ?? 0;
 
   // Validate address form
   const validateShippingForm = () => {
@@ -409,6 +403,56 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                       <span className="text-blue-900 font-extrabold">${totalFinancedAmount.toLocaleString('es-AR')}</span>
                     </div>
                   </div>
+
+                  {/*
+                    Desglose fiscal. La transparencia fiscal al consumidor
+                    obliga a informar cuánto del precio es impuesto EN EL
+                    MOMENTO DE LA VENTA, no sólo en el comprobante posterior.
+                    Los montos vienen del servidor, congelados igual en la
+                    orden cuando se confirma.
+                  */}
+                  {sim && (
+                    <div className="bg-white border border-slate-200/60 rounded-2xl p-4 mt-3">
+                      <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-2.5">
+                        Discriminación de impuestos
+                      </p>
+                      <div className="space-y-1.5 text-xs">
+                        <div className="flex justify-between text-slate-500">
+                          <span>Neto gravado</span>
+                          <span className="tabular-nums">${sim.taxes.net.toLocaleString('es-AR', { minimumFractionDigits: 2 })}</span>
+                        </div>
+                        <div className="flex justify-between text-slate-500">
+                          <span>IVA sobre la mercadería</span>
+                          <span className="tabular-nums">${sim.taxes.iva.toLocaleString('es-AR', { minimumFractionDigits: 2 })}</span>
+                        </div>
+                        {sim.taxes.ivaInteres > 0 && (
+                          <div className="flex justify-between text-slate-500">
+                            <span>
+                              IVA sobre la financiación
+                              <span className="block text-[10px] text-slate-400">Hecho imponible distinto al de la mercadería</span>
+                            </span>
+                            <span className="tabular-nums">${sim.taxes.ivaInteres.toLocaleString('es-AR', { minimumFractionDigits: 2 })}</span>
+                          </div>
+                        )}
+                        {/* Con varias alícuotas en el carrito conviene aclarar cuáles */}
+                        {new Set(sim.items.map((i) => i.ivaRate)).size > 1 && (
+                          <p className="text-[10px] text-slate-400 pt-1 leading-tight">
+                            Tu compra tiene productos con distinta alícuota:{' '}
+                            {[...new Set(sim.items.map((i) => i.ivaRate))]
+                              .sort((a, b) => a - b)
+                              .map((r) => `${(r * 100).toFixed(1).replace('.0', '')}%`)
+                              .join(' y ')}.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {simError && (
+                    <div className="bg-rose-50 border border-rose-100 rounded-2xl p-3 mt-3 text-xs text-rose-700">
+                      {simError}
+                    </div>
+                  )}
                 </motion.div>
               )}
 
