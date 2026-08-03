@@ -2,7 +2,8 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   fetchProducts, fetchBanks, fetchCategories, fetchCards, addCard, me, logout,
-  type Category, type Customer, type ApiCard, getToken,
+  fetchOrders, fetchOrder,
+  type Category, type Customer, type ApiCard, type ApiOrder, getToken,
 } from './api';
 import { AuthModal } from './components/AuthModal';
 import type { Bank } from './types';
@@ -11,6 +12,34 @@ import type { Bank } from './types';
  * La API devuelve la tarjeta con id numérico; los componentes del prototipo
  * esperan `CreditCard` con id string. Se traduce acá, en un solo lugar.
  */
+/** El comprobante completo de la API, en la forma que espera el ticket. */
+function aCompra(o: ApiOrder): Purchase {
+  return {
+    id: `#${o.orderNumber}`,
+    orderId: o.id,
+    date: new Date(o.date).toLocaleDateString('es-AR', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    }),
+    items: o.items.map((i) => ({
+      productId: i.productId, productName: i.productName,
+      price: i.price, quantity: i.quantity,
+    })),
+    totalAmount: o.totalAmount,
+    cardUsed: {
+      bankName: o.cardUsed.bankName,
+      brand: o.cardUsed.brand as Purchase['cardUsed']['brand'],
+      cardNumber: o.cardUsed.cardNumber,
+    },
+    installments: o.installments,
+    installmentPrice: o.installmentPrice,
+    cft: o.cft * 100,
+    reintegroAmount: o.reintegroAmount,
+    taxes: o.taxes,
+    merchants: o.merchants,
+  };
+}
+
 function aTarjeta(c: ApiCard): CreditCard {
   return {
     id: String(c.id),
@@ -93,6 +122,7 @@ export default function App() {
   // Purchases logs
   const [purchaseHistory, setPurchaseHistory] = useState<Purchase[]>([]);
   const [showInvoice, setShowInvoice] = useState<Purchase | null>(null);
+  const [invoiceLoading, setInvoiceLoading] = useState<number | null>(null);
 
   // --- ACTIONS ---
   const handleSelectCard = (card: CreditCard) => {
@@ -151,9 +181,11 @@ export default function App() {
     );
   };
 
-  const handleCompletePurchase = (purchase: Purchase) => {
-    setPurchaseHistory((prev) => [purchase, ...prev]);
-    setCart([]); // Clear cart
+  const handleCompletePurchase = () => {
+    // La orden ya está en el servidor: se relee en vez de agregarla a mano,
+    // así el historial siempre refleja lo que hay en la base.
+    recargarHistorial();
+    setCart([]);
   };
 
 
@@ -184,6 +216,56 @@ export default function App() {
   }, [user]);
 
   useEffect(() => { recargarTarjetas(); }, [recargarTarjetas]);
+
+  /**
+   * El historial vive en el servidor: se pide al entrar y después de cada
+   * compra. Antes sólo existía en memoria y se perdía al recargar.
+   *
+   * El listado no trae los ítems ni el desglose de impuestos —sería arrastrar
+   * el detalle completo de cada compra para una tabla de cinco columnas— así
+   * que eso se pide recién al abrir el ticket.
+   */
+  const recargarHistorial = React.useCallback(() => {
+    if (!user) { setPurchaseHistory([]); return; }
+    fetchOrders()
+      .then((ordenes) => setPurchaseHistory(ordenes.map((o) => ({
+        id: `#${o.order_number}`,
+        orderId: o.id,
+        date: new Date(o.created_at).toLocaleDateString('es-AR', {
+          day: '2-digit', month: '2-digit', year: 'numeric',
+          hour: '2-digit', minute: '2-digit',
+        }),
+        items: [],
+        totalAmount: Number(o.total_amount),
+        cardUsed: {
+          bankName: o.bank_name,
+          brand: o.card_brand as Purchase['cardUsed']['brand'],
+          cardNumber: `•••• •••• •••• ${o.card_last4}`,
+        },
+        installments: o.installments,
+        installmentPrice: Number(o.installment_amount),
+        cft: 0,
+        reintegroAmount: Number(o.reintegro_amount),
+      }))))
+      .catch(() => setPurchaseHistory([]));
+  }, [user]);
+
+  useEffect(() => { recargarHistorial(); }, [recargarHistorial]);
+
+  /** Abre el ticket pidiendo el comprobante completo. */
+  const verTicket = async (compra: Purchase) => {
+    if (!compra.orderId) { setShowInvoice(compra); return; }
+    setInvoiceLoading(compra.orderId);
+    try {
+      setShowInvoice(aCompra(await fetchOrder(compra.orderId)));
+    } catch {
+      // Si el detalle falla se muestra lo que ya se tiene del listado: es
+      // preferible un ticket incompleto a un botón que no hace nada.
+      setShowInvoice(compra);
+    } finally {
+      setInvoiceLoading(null);
+    }
+  };
 
   /** Abre el login explicando por qué hace falta. */
   const pedirLogin = (motivo?: string) => { setAuthMotivo(motivo); setAuthOpen(true); };
@@ -490,10 +572,11 @@ export default function App() {
                         <button
                           type="button"
                           id={`show-invoice-btn-${p.id}`}
-                          onClick={() => setShowInvoice(p)}
+                          disabled={invoiceLoading === p.orderId}
+                          onClick={() => verTicket(p)}
                           className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full font-bold transition-all flex items-center gap-1.5 ml-auto text-[11px]"
                         >
-                          Ver Ticket
+                          {invoiceLoading === p.orderId ? 'Abriendo…' : 'Ver Ticket'}
                           <ExternalLink size={11} />
                         </button>
                       </td>
@@ -621,14 +704,72 @@ export default function App() {
                   <span className="text-slate-800">{showInvoice.installments} cuotas fijas</span>
                 </div>
 
-                <div className="border-t border-slate-100 pt-3 space-y-1.5">
-                  {showInvoice.items.map((item, idx) => (
-                    <div key={idx} className="flex justify-between">
-                      <span>{item.productName} (x{item.quantity})</span>
-                      <span className="font-mono text-slate-700">${item.price.toLocaleString('es-AR')}</span>
+                {/* Ítems, agrupados por comercio cuando la compra tocó varios */}
+                {showInvoice.merchants && showInvoice.merchants.length > 0 ? (
+                  <div className="border-t border-slate-100 pt-3 space-y-3">
+                    {showInvoice.merchants.map((m) => (
+                      <div key={m.merchantOrderNumber}>
+                        {showInvoice.merchants!.length > 1 && (
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                            {m.merchantName}
+                          </p>
+                        )}
+                        <div className="space-y-1.5">
+                          {m.items.map((item, idx) => (
+                            <div key={idx} className="flex justify-between">
+                              <span>{item.productName} (x{item.quantity})</span>
+                              <span className="font-mono text-slate-700">
+                                ${(item.price * item.quantity).toLocaleString('es-AR')}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="border-t border-slate-100 pt-3 space-y-1.5">
+                    {showInvoice.items.map((item, idx) => (
+                      <div key={idx} className="flex justify-between">
+                        <span>{item.productName} (x{item.quantity})</span>
+                        <span className="font-mono text-slate-700">${item.price.toLocaleString('es-AR')}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/*
+                  Discriminación de impuestos. Es lo que la transparencia
+                  fiscal obliga a informar, y son los montos congelados al
+                  momento de la venta: no se recalculan al reimprimir.
+                */}
+                {showInvoice.taxes && (
+                  <div className="border-t border-slate-100 pt-3 space-y-1">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                      Discriminación de impuestos
+                    </p>
+                    <div className="flex justify-between">
+                      <span>Neto gravado</span>
+                      <span className="font-mono text-slate-700">
+                        ${showInvoice.taxes.net.toLocaleString('es-AR', { minimumFractionDigits: 2 })}
+                      </span>
                     </div>
-                  ))}
-                </div>
+                    <div className="flex justify-between">
+                      <span>IVA sobre la mercadería</span>
+                      <span className="font-mono text-slate-700">
+                        ${showInvoice.taxes.iva.toLocaleString('es-AR', { minimumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                    {showInvoice.taxes.ivaInteres > 0 && (
+                      <div className="flex justify-between">
+                        <span>IVA sobre la financiación</span>
+                        <span className="font-mono text-slate-700">
+                          ${showInvoice.taxes.ivaInteres.toLocaleString('es-AR', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="border-t border-slate-100 pt-3 space-y-1">
                   <div className="flex justify-between font-bold text-slate-700">

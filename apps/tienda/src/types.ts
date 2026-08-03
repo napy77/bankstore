@@ -65,6 +65,21 @@ export interface CartItem {
 }
 
 export interface Purchase {
+  /**
+   * Desglose fiscal, cuando viene del comprobante completo. El listado del
+   * historial no lo trae: se pide al abrir el ticket.
+   */
+  taxes?: { net: number; iva: number; ivaInteres: number };
+  /** Corte por comercio. Sólo en el comprobante completo. */
+  merchants?: {
+    merchantName: string;
+    merchantOrderNumber: number;
+    status: string;
+    subtotal: number;
+    items: { productName: string; quantity: number; price: number }[];
+  }[];
+  /** Id numérico de la orden, para pedir el detalle. */
+  orderId?: number;
   id: string;
   date: string;
   items: {

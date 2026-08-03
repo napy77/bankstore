@@ -436,6 +436,31 @@ export async function createOrder(
   });
 }
 
-export async function fetchOrders(): Promise<Record<string, unknown>[]> {
-  return authed<Record<string, unknown>[]>('/api/orders');
+export async function fetchOrders(): Promise<OrderSummary[]> {
+  return authed<OrderSummary[]>('/api/orders');
+}
+
+/** Una compra del historial, como la devuelve el listado. */
+export interface OrderSummary {
+  id: number;
+  order_number: number;
+  created_at: string;
+  total_amount: number;
+  installments: number;
+  installment_amount: number;
+  reintegro_amount: number;
+  bank_name: string;
+  card_brand: string;
+  card_last4: string;
+  merchant_count: number;
+  item_count: number;
+}
+
+/**
+ * El comprobante completo, con el desglose de impuestos y el corte por
+ * comercio. El listado no los trae para no arrastrar todo el detalle de cada
+ * compra en la pantalla de historial.
+ */
+export async function fetchOrder(id: number): Promise<ApiOrder> {
+  return authed<ApiOrder>(`/api/orders/${id}`);
 }
