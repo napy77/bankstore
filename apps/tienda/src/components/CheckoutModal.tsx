@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CartItem, CreditCard, Purchase, Bank } from '../types';
 import { CardVisualizer } from './CardVisualizer';
-import { simulateCart, createOrder, type CartSimulation, type ApiOrder } from '../api';
+import { simulateCart, createOrder, fetchAddresses, type CartSimulation, type ApiOrder, type Address } from '../api';
 import { X, ArrowRight, ArrowLeft, Check, CheckCircle2, ShieldCheck, Truck, DollarSign, Calendar, Landmark, MapPin, ReceiptText, ChevronRight, Loader2 } from 'lucide-react';
 
 interface CheckoutModalProps {
@@ -41,6 +41,10 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   
   // Shipping details state
   const [shipping, setShipping] = useState({
+    // Quién recibe puede no ser el titular de la tarjeta, y el correo pide un
+    // teléfono para coordinar la entrega.
+    recipient: '',
+    phone: '',
     street: '',
     number: '',
     apartment: '',
@@ -48,6 +52,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     city: 'CABA',
     province: 'Buenos Aires'
   });
+  /** Direcciones ya guardadas. Quien compró una vez suele repetir domicilio. */
+  const [addresses, setAddresses] = useState<Address[]>([]);
+  const [addressId, setAddressId] = useState<number | null>(null);
 
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
 
@@ -91,6 +98,19 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     return () => ctrl.abort();
   }, [isOpen, cart, selectedCard?.bankId, installments]);
 
+  // La libreta se pide al abrir el checkout, no al montar: si el comprador
+  // nunca llega a pagar, no hace falta haberla traído.
+  useEffect(() => {
+    if (!isOpen) return;
+    fetchAddresses()
+      .then((dirs) => {
+        setAddresses(dirs);
+        const pref = dirs.find((d) => d.isDefault) ?? dirs[0];
+        if (pref) setAddressId(pref.id);
+      })
+      .catch(() => setAddresses([]));
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const totalAmount = cart.reduce((acc, item) => acc + item.product.price * item.quantity, 0);
@@ -110,6 +130,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   // Validate address form
   const validateShippingForm = () => {
     const errors: Record<string, string> = {};
+    // Con una dirección guardada elegida no hay nada que validar.
+    if (addressId !== null) { setFormErrors({}); return true; }
+    if (!shipping.recipient.trim()) errors.recipient = 'Decinos quién recibe';
     if (!shipping.street.trim()) errors.street = 'La calle es obligatoria';
     if (!shipping.number.trim()) errors.number = 'La altura es obligatoria';
     if (!shipping.zip.trim()) errors.zip = 'El código postal es obligatorio';
@@ -142,7 +165,22 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
         cart.map((i) => ({ productId: i.product.id, quantity: i.quantity })),
         Number(selectedCard.id),
         installments,
-        clave
+        clave,
+        addressId !== null
+          ? { addressId }
+          : {
+              shipping: {
+                recipient: shipping.recipient,
+                phone: shipping.phone || null,
+                street: shipping.street,
+                number: shipping.number,
+                floorApt: shipping.apartment || null,
+                zip: shipping.zip,
+                city: shipping.city,
+                province: shipping.province,
+                notes: null,
+              },
+            }
       );
 
       const purchase: Purchase = {
@@ -504,6 +542,52 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                     </div>
                   )}
 
+                  {/* Direcciones guardadas: lo más común es repetir domicilio */}
+                  {addresses.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                        Enviar a
+                      </p>
+                      {addresses.map((d) => (
+                        <button
+                          key={d.id}
+                          type="button"
+                          onClick={() => setAddressId(d.id)}
+                          className={`w-full text-left p-3.5 rounded-2xl border transition-all ${
+                            addressId === d.id
+                              ? 'border-blue-600 bg-blue-50/50 ring-1 ring-blue-600'
+                              : 'border-slate-200 hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="flex items-start gap-2">
+                            <MapPin size={15} className={addressId === d.id ? 'text-blue-600 mt-0.5' : 'text-slate-400 mt-0.5'} />
+                            <div className="text-xs">
+                              <span className="font-bold text-slate-800">
+                                {d.recipient}
+                                {d.label && <span className="text-slate-400 font-normal"> · {d.label}</span>}
+                              </span>
+                              <span className="block text-slate-500">
+                                {d.street} {d.number}
+                                {d.floorApt && `, ${d.floorApt}`} · {d.city}, {d.province} ({d.zip})
+                              </span>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => setAddressId(null)}
+                        className={`w-full text-left p-3 rounded-2xl border border-dashed transition-all text-xs font-bold ${
+                          addressId === null
+                            ? 'border-blue-600 text-blue-700 bg-blue-50/50'
+                            : 'border-slate-300 text-slate-500 hover:bg-slate-50'
+                        }`}
+                      >
+                        + Usar otro domicilio
+                      </button>
+                    </div>
+                  )}
+
                   <div className="bg-emerald-50/50 border border-emerald-100 rounded-2xl p-4 flex gap-3 text-xs text-slate-600">
                     <Truck size={20} className="text-emerald-600 mt-0.5 shrink-0" />
                     <p className="leading-relaxed">
@@ -511,8 +595,33 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                     </p>
                   </div>
 
-                  {/* Shipping Form Grid */}
+                  {/* Formulario, sólo si no eligió una guardada */}
+                  {addressId === null && (
                   <div className="grid grid-cols-6 gap-3.5 pt-1">
+                    <div className="col-span-4">
+                      <label className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1.5">Quién recibe</label>
+                      <input
+                        type="text"
+                        id="shipping-recipient"
+                        placeholder="Nombre y apellido"
+                        value={shipping.recipient}
+                        onChange={(e) => setShipping({ ...shipping, recipient: e.target.value })}
+                        className="w-full bg-slate-50 text-slate-800 border border-slate-200 rounded-xl p-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-slate-400 transition-all"
+                      />
+                      {formErrors.recipient && <p className="text-[10px] text-rose-600 font-semibold mt-0.5">{formErrors.recipient}</p>}
+                    </div>
+                    <div className="col-span-2">
+                      <label className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1.5">Teléfono</label>
+                      <input
+                        type="tel"
+                        id="shipping-phone"
+                        placeholder="11 5555-5555"
+                        value={shipping.phone}
+                        onChange={(e) => setShipping({ ...shipping, phone: e.target.value })}
+                        className="w-full bg-slate-50 text-slate-800 border border-slate-200 rounded-xl p-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-slate-400 transition-all"
+                      />
+                      <p className="text-[10px] text-slate-400 mt-0.5">Para coordinar la entrega.</p>
+                    </div>
                     <div className="col-span-4">
                       <label className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1.5">Calle</label>
                       <input
@@ -586,6 +695,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                       />
                     </div>
                   </div>
+                  )}
                 </motion.div>
               )}
 

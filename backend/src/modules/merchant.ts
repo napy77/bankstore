@@ -247,7 +247,43 @@ merchantRouter.get("/orders/:id", async (req, res, next) => {
       "SELECT product_id, product_name, quantity, unit_price FROM order_items WHERE merchant_order_id = $1",
       [Number(req.params.id)]
     );
-    res.json({ ...rows[0], items });
+
+    // Domicilio y peso a despachar, ya cruzados por la vista: es lo que hace
+    // falta para armar el remito y cotizar con el transportista.
+    const { rows: envio } = await pool.query(
+      `SELECT ship_recipient, ship_phone, ship_street, ship_number, ship_floor_apt,
+              ship_zip, ship_city, ship_province, ship_notes,
+              bultos, peso_real_g, peso_volumetrico_g, faltan_dimensiones
+       FROM merchant_shipments WHERE merchant_order_id = $1`,
+      [Number(req.params.id)]
+    );
+    const e = envio[0];
+
+    res.json({
+      ...rows[0],
+      items,
+      shipping: e?.ship_street ? {
+        recipient: e.ship_recipient,
+        phone: e.ship_phone,
+        street: e.ship_street,
+        number: e.ship_number,
+        floorApt: e.ship_floor_apt,
+        zip: e.ship_zip,
+        city: e.ship_city,
+        province: e.ship_province,
+        notes: e.ship_notes,
+      } : null,
+      logistics: e ? {
+        bultos: e.bultos,
+        pesoRealG: e.peso_real_g,
+        pesoVolumetricoG: e.peso_volumetrico_g,
+        // El transportista cobra por el mayor de los dos.
+        pesoFacturableG: Math.max(e.peso_real_g, e.peso_volumetrico_g),
+        // Un producto sin dimensiones no se puede cotizar: mejor avisarlo acá
+        // que dejar que el transportista lo rebote en el depósito.
+        faltanDimensiones: e.faltan_dimensiones,
+      } : null,
+    });
   } catch (err) {
     next(err);
   }

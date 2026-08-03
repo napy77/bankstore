@@ -41,7 +41,7 @@ server {
 
     # Sólo lo que necesita un comprador. /api/admin y /api/merchant no existen
     # desde acá.
-    location ~ ^/api/(auth|catalog|cards|orders)(/|$) {
+    location ~ ^/api/(auth|catalog|cards|orders|addresses)(/|$) {
         include snippets/bankstore-proxy.conf;
     }
 

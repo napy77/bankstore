@@ -412,6 +412,12 @@ export interface ApiOrder {
   tna: number;
   tea: number;
   cft: number;
+  /** Domicilio congelado al vender. Null en compras de puros servicios. */
+  shipping: {
+    recipient: string; phone: string | null; street: string; number: string;
+    floorApt: string | null; zip: string; city: string; province: string;
+    notes: string | null;
+  } | null;
   duplicated?: boolean;
 }
 
@@ -428,11 +434,13 @@ export async function createOrder(
   items: { productId: string; quantity: number }[],
   cardId: number,
   installments: number,
-  idempotencyKey: string
+  idempotencyKey: string,
+  /** Id de una dirección guardada, o los datos de una nueva. */
+  envio: { addressId: number } | { shipping: Record<string, unknown> }
 ): Promise<ApiOrder> {
   return authed<ApiOrder>('/api/orders', {
     method: 'POST',
-    body: JSON.stringify({ items, cardId, installments, idempotencyKey }),
+    body: JSON.stringify({ items, cardId, installments, idempotencyKey, ...envio }),
   });
 }
 
@@ -463,4 +471,27 @@ export interface OrderSummary {
  */
 export async function fetchOrder(id: number): Promise<ApiOrder> {
   return authed<ApiOrder>(`/api/orders/${id}`);
+}
+
+// ── Direcciones ──────────────────────────────────────────────────────────────
+
+export interface Address {
+  id: number;
+  label: string | null;
+  recipient: string;
+  phone: string | null;
+  street: string;
+  number: string;
+  floorApt: string | null;
+  zip: string;
+  city: string;
+  province: string;
+  notes: string | null;
+  isDefault: boolean;
+}
+
+export type NuevaDireccion = Omit<Address, 'id' | 'isDefault'>;
+
+export async function fetchAddresses(): Promise<Address[]> {
+  return authed<Address[]>('/api/addresses');
 }

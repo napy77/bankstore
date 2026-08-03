@@ -7,6 +7,7 @@ import { quote } from "../lib/installments.js";
 import { applyCaps, resolveBenefit, type AgreementRow, type ProductOfferRow } from "../lib/agreements.js";
 import { round2 } from "../lib/money.js";
 import { breakdown } from "../lib/units.js";
+import { addressSchema } from "./addresses.js";
 
 export const ordersRouter = Router();
 
@@ -38,6 +39,16 @@ const checkoutSchema = z.object({
   cardId: z.coerce.number().int(),
   installments: z.coerce.number().int().min(1).max(24),
   idempotencyKey: z.string().min(8).max(64).optional(),
+  /**
+   * A dónde se despacha. Se acepta el id de una dirección ya guardada o los
+   * datos sueltos; en el segundo caso se guarda también en la libreta, porque
+   * quien compra una vez suele volver a comprar al mismo lugar.
+   *
+   * Es obligatorio para productos físicos: sin esto el comercio no sabe adónde
+   * mandar. Los servicios (hotel, spa) no lo necesitan.
+   */
+  addressId: z.coerce.number().int().optional(),
+  shipping: addressSchema.omit({ isDefault: true }).partial({ label: true, phone: true, floorApt: true, notes: true }).optional(),
 });
 
 /** Fila de products + las condiciones comerciales del comercio dueño. */
@@ -49,6 +60,7 @@ interface ProductoConComercio {
   category_id: string;
   stock: number;
   iva_rate: number;
+  kind: string;
   merchant_id: string;
   merchant_status: string;
   trade_name: string;
@@ -111,7 +123,7 @@ ordersRouter.post("/", async (req, res, next) => {
     // aunque su catálogo siga publicado.
     const { rows: products } = await client.query<ProductoConComercio>(
       `SELECT p.id, p.name, p.price, p.original_price, p.category_id, p.stock, p.iva_rate,
-              p.merchant_id,
+              p.kind, p.merchant_id,
               m.status AS merchant_status, m.trade_name, m.commission_percent,
               m.absorbs_installment_cost, m.settlement_days
        FROM products p JOIN merchants m ON m.id = p.merchant_id
@@ -215,6 +227,42 @@ ordersRouter.post("/", async (req, res, next) => {
       );
     }
 
+    // ── Domicilio de entrega ─────────────────────────────────────────────────
+    // Sólo hace falta si hay algo que despachar. Un carrito de puros servicios
+    // (hotel, spa) no lo necesita, y exigirlo sería pedir un dato que no se usa.
+    const hayFisicos = lineas.some((l) => l.product.kind !== "service");
+    let direccion: Record<string, any> | null = null;
+
+    if (body.addressId !== undefined) {
+      const { rows } = await client.query(
+        "SELECT * FROM user_addresses WHERE id = $1 AND user_id = $2",
+        [body.addressId, userId]
+      );
+      if (!rows[0]) throw new HttpError(404, "Esa dirección no está en tu libreta");
+      direccion = rows[0];
+    } else if (body.shipping) {
+      // Dirección nueva: se guarda en la libreta y se usa. Si es la primera,
+      // queda como predeterminada.
+      const { rows: cuantas } = await client.query(
+        "SELECT COUNT(*)::int AS n FROM user_addresses WHERE user_id = $1",
+        [userId]
+      );
+      const sh = body.shipping;
+      const { rows } = await client.query(
+        `INSERT INTO user_addresses (user_id, label, recipient, phone, street, number,
+                                     floor_apt, zip, city, province, notes, is_default)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+        [userId, sh.label ?? null, sh.recipient, sh.phone ?? null, sh.street, sh.number,
+         sh.floorApt ?? null, sh.zip, sh.city, sh.province, sh.notes ?? null,
+         cuantas[0].n === 0]
+      );
+      direccion = rows[0];
+    }
+
+    if (hayFisicos && !direccion) {
+      throw new HttpError(400, "Falta el domicilio de entrega");
+    }
+
     const reintegro = applyCaps(reintegroLines);
 
     // Totales fiscales. El neto sale de sumar las líneas y el IVA por
@@ -270,8 +318,12 @@ ordersRouter.post("/", async (req, res, next) => {
                            installments, subtotal, discount_amount, total_amount, interest_amount,
                            installment_amount, reintegro_amount, tna, tea, cft,
                            idempotency_key, merchant_count,
-                           net_amount, iva_amount, iva_interes_amount)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+                           net_amount, iva_amount, iva_interes_amount,
+                           shipping_address_id, ship_recipient, ship_phone, ship_street,
+                           ship_number, ship_floor_apt, ship_zip, ship_city, ship_province,
+                           ship_notes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
+               $23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
        RETURNING id`,
       [
         next_number, userId, card.id, card.bank_id, card.bank_name, card.brand, card.last4,
@@ -283,6 +335,14 @@ ordersRouter.post("/", async (req, res, next) => {
         // El IVA del crédito es otro hecho imponible: no es el del producto,
         // es el de la financiación. Ya se calculaba para el CFT.
         financing.vatAmount,
+        // El domicilio se COPIA además de referenciarse: si el comprador lo
+        // edita o lo borra, el remito ya emitido tiene que seguir igual.
+        direccion?.id ?? null,
+        direccion?.recipient ?? null, direccion?.phone ?? null,
+        direccion?.street ?? null, direccion?.number ?? null,
+        direccion?.floor_apt ?? null, direccion?.zip ?? null,
+        direccion?.city ?? null, direccion?.province ?? null,
+        direccion?.notes ?? null,
       ]
     );
 
@@ -424,6 +484,18 @@ async function getOrder(orderId: number, userId: number) {
     tna: order.tna,
     tea: order.tea,
     cft: order.cft,
+    // El domicilio congelado al vender. Null en compras de puros servicios.
+    shipping: order.ship_street ? {
+      recipient: order.ship_recipient,
+      phone: order.ship_phone,
+      street: order.ship_street,
+      number: order.ship_number,
+      floorApt: order.ship_floor_apt,
+      zip: order.ship_zip,
+      city: order.ship_city,
+      province: order.ship_province,
+      notes: order.ship_notes,
+    } : null,
   };
 }
 

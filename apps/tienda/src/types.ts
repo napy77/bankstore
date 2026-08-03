@@ -80,6 +80,12 @@ export interface Purchase {
   }[];
   /** Id numérico de la orden, para pedir el detalle. */
   orderId?: number;
+  /** Domicilio de entrega, congelado al vender. */
+  shipping?: {
+    recipient: string; phone: string | null; street: string; number: string;
+    floorApt: string | null; zip: string; city: string; province: string;
+    notes: string | null;
+  } | null;
   id: string;
   date: string;
   items: {

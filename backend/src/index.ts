@@ -10,6 +10,7 @@ import { staffAuthRouter } from "./modules/staff-auth.js";
 import { catalogRouter } from "./modules/catalog.js";
 import { cardsRouter } from "./modules/cards.js";
 import { ordersRouter } from "./modules/orders.js";
+import { addressesRouter } from "./modules/addresses.js";
 import { adminRouter } from "./modules/admin.js";
 import { merchantRouter } from "./modules/merchant.js";
 import { integrationRouter } from "./modules/integration.js";
@@ -33,6 +34,7 @@ app.use("/api/auth", authRouter);
 app.use("/api/catalog", catalogRouter);          // público: se mira sin cuenta
 app.use("/api/cards", requireAuth, cardsRouter);
 app.use("/api/orders", requireAuth, ordersRouter);
+app.use("/api/addresses", requireAuth, addressesRouter);
 
 // ── Back-office ──────────────────────────────────────────────────────────────
 // Los guards van montados acá y no dentro de cada router: así no existe la

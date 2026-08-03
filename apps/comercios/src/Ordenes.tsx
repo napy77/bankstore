@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
   type ApiClient, type MerchantOrder, type MerchantOrderStatus,
-  money, dateTime, date, ORDER_STATUS_LABEL,
+  money, dateTime, date, gToKg, ORDER_STATUS_LABEL,
   ErrorBanner, Loading, Empty, StatusBadge, Modal,
 } from "@bankstore/shared";
 
@@ -26,6 +26,15 @@ const SIGUIENTE: Record<MerchantOrderStatus, { estado: MerchantOrderStatus; labe
 interface Detalle extends MerchantOrder {
   items: { product_id: string; product_name: string; quantity: number; unit_price: number }[];
   customer_email: string;
+  shipping: {
+    recipient: string; phone: string | null; street: string; number: string;
+    floorApt: string | null; zip: string; city: string; province: string;
+    notes: string | null;
+  } | null;
+  logistics: {
+    bultos: number; pesoRealG: number; pesoVolumetricoG: number;
+    pesoFacturableG: number; faltanDimensiones: boolean;
+  } | null;
 }
 
 export function Ordenes({ api }: { api: ApiClient }) {
@@ -169,6 +178,54 @@ export function Ordenes({ api }: { api: ApiClient }) {
               </tbody>
             </table>
           </div>
+
+          {/* Adónde se despacha: es lo primero que necesita quien prepara el envío */}
+          <h3 style={{ marginTop: 18 }}>Envío</h3>
+          {detalle.shipping ? (
+            <div className="card" style={{ background: "#fafbfc" }}>
+              <div className="row" style={{ alignItems: "flex-start", gap: 16 }}>
+                <div style={{ flex: 1, minWidth: 200 }}>
+                  <strong>{detalle.shipping.recipient}</strong>
+                  <div style={{ color: "var(--color-slate-600)" }}>
+                    {detalle.shipping.street} {detalle.shipping.number}
+                    {detalle.shipping.floorApt && `, ${detalle.shipping.floorApt}`}
+                    <br />
+                    {detalle.shipping.city}, {detalle.shipping.province} ({detalle.shipping.zip})
+                  </div>
+                  {detalle.shipping.phone && (
+                    <div className="hint">Tel. {detalle.shipping.phone}</div>
+                  )}
+                  {detalle.shipping.notes && (
+                    <div className="hint">Referencia: {detalle.shipping.notes}</div>
+                  )}
+                </div>
+                {detalle.logistics && (
+                  <div style={{ minWidth: 190 }}>
+                    <div className="hint" style={{ marginTop: 0 }}>
+                      {detalle.logistics.bultos} bulto{detalle.logistics.bultos !== 1 ? "s" : ""}
+                    </div>
+                    <div>
+                      Peso real {gToKg(detalle.logistics.pesoRealG)} kg
+                      <div className="hint">
+                        Volumétrico {gToKg(detalle.logistics.pesoVolumetricoG)} kg
+                      </div>
+                    </div>
+                    <div style={{ marginTop: 6 }}>
+                      <strong>Se factura {gToKg(detalle.logistics.pesoFacturableG)} kg</strong>
+                    </div>
+                    {detalle.logistics.faltanDimensiones && (
+                      <div className="alert warn" style={{ marginTop: 8, marginBottom: 0 }}>
+                        Hay productos sin dimensiones cargadas: el transportista no va a
+                        poder cotizar hasta que las completes.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <Empty>Sin domicilio: la compra es de servicios, no se despacha.</Empty>
+          )}
 
           <h3 style={{ marginTop: 18 }}>Productos</h3>
           <div className="table-wrap">

@@ -37,6 +37,7 @@ function aCompra(o: ApiOrder): Purchase {
     reintegroAmount: o.reintegroAmount,
     taxes: o.taxes,
     merchants: o.merchants,
+    shipping: o.shipping,
   };
 }
 
@@ -735,6 +736,23 @@ export default function App() {
                         <span className="font-mono text-slate-700">${item.price.toLocaleString('es-AR')}</span>
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {showInvoice.shipping && (
+                  <div className="border-t border-slate-100 pt-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                      Envío a
+                    </p>
+                    <p className="text-slate-700 leading-snug">
+                      <strong className="text-slate-800">{showInvoice.shipping.recipient}</strong>
+                      <br />
+                      {showInvoice.shipping.street} {showInvoice.shipping.number}
+                      {showInvoice.shipping.floorApt && `, ${showInvoice.shipping.floorApt}`}
+                      <br />
+                      {showInvoice.shipping.city}, {showInvoice.shipping.province} ({showInvoice.shipping.zip})
+                      {showInvoice.shipping.phone && <><br />Tel. {showInvoice.shipping.phone}</>}
+                    </p>
                   </div>
                 )}
 

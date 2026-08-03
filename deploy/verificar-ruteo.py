@@ -100,6 +100,7 @@ CASOS = [
     ("/api/catalog/products",      "backend", "404",     "backend"),
     ("/api/cards",                 "backend", "404",     "404"),
     ("/api/orders",                "backend", "404",     "404"),
+    ("/api/addresses",             "backend", "404",     "404"),
     # Back-office
     ("/api/staff/login",           "404",     "backend", "backend"),
     ("/api/merchant/products",     "404",     "backend", "404"),
