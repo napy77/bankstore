@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickAgreement, resolveBenefit, applyCaps, type AgreementRow } from "../src/lib/agreements.js";
+import {
+  pickAgreement, resolveBenefit, applyCaps, construirCaminos, type AgreementRow,
+} from "../src/lib/agreements.js";
 
 function ag(p: Partial<AgreementRow> & { id: number }): AgreementRow {
   return {
@@ -131,4 +133,80 @@ test("acuerdos distintos topean por separado", () => {
 
 test("sin tope se reintegra todo", () => {
   assert.equal(applyCaps([{ capKey: "ag:9", amount: 12345.67, capAmount: null }]), 12345.67);
+});
+
+// ── Herencia por rama ────────────────────────────────────────────────────────
+// El árbol de categorías rompió esto en silencio: un acuerdo sobre
+// "electrohogar" dejaba de aplicar a un producto en "ventiladores".
+
+const CAMINO_VENTILADOR = ["electrohogar", "climatizacion", "ventiladores"];
+
+test("un acuerdo sobre la raíz cubre toda su rama", () => {
+  const agreements = [ag({ id: 1, category_id: "electrohogar", max_cuotas: 12 })];
+  const picked = pickAgreement(agreements, "galicia", "electro-1", CAMINO_VENTILADOR);
+  assert.equal(picked?.id, 1, "electrohogar tiene que cubrir a ventiladores");
+});
+
+test("un acuerdo de otra rama sigue sin aplicar", () => {
+  const agreements = [ag({ id: 1, category_id: "ferreteria", max_cuotas: 12 })];
+  assert.equal(pickAgreement(agreements, "galicia", "electro-1", CAMINO_VENTILADOR), undefined);
+});
+
+test("a igual alcance gana el acuerdo más cercano a la hoja", () => {
+  const agreements = [
+    ag({ id: 1, category_id: "electrohogar", max_cuotas: 24 }),
+    ag({ id: 2, category_id: "climatizacion", max_cuotas: 6 }),
+  ];
+  const picked = pickAgreement(agreements, "galicia", "electro-1", CAMINO_VENTILADOR);
+  assert.equal(picked?.id, 2, "climatizacion está más abajo que electrohogar");
+});
+
+test("la hoja exacta le gana a cualquier ancestro", () => {
+  const agreements = [
+    ag({ id: 1, category_id: "electrohogar", max_cuotas: 24 }),
+    ag({ id: 2, category_id: "climatizacion", max_cuotas: 18 }),
+    ag({ id: 3, category_id: "ventiladores", max_cuotas: 3 }),
+  ];
+  assert.equal(pickAgreement(agreements, "galicia", "electro-1", CAMINO_VENTILADOR)?.id, 3);
+});
+
+test("comercio sin categoría sigue ganándole a una categoría de la rama", () => {
+  const agreements = [
+    ag({ id: 1, category_id: "ventiladores", max_cuotas: 24 }),
+    ag({ id: 2, merchant_id: "electro-1", max_cuotas: 6 }),
+  ];
+  assert.equal(pickAgreement(agreements, "galicia", "electro-1", CAMINO_VENTILADOR)?.id, 2);
+});
+
+test("el orden de entrada no cambia cuál gana en la rama", () => {
+  const base = [
+    ag({ id: 1, category_id: "electrohogar", max_cuotas: 24 }),
+    ag({ id: 2, category_id: "climatizacion", max_cuotas: 6 }),
+    ag({ id: 3, max_cuotas: 3 }),
+  ];
+  const directo = pickAgreement(base, "galicia", "electro-1", CAMINO_VENTILADOR)?.id;
+  const alReves = pickAgreement([...base].reverse(), "galicia", "electro-1", CAMINO_VENTILADOR)?.id;
+  assert.equal(directo, alReves);
+  assert.equal(directo, 2);
+});
+
+test("construirCaminos arma el recorrido hasta la raíz", () => {
+  const caminos = construirCaminos([
+    { id: "electrohogar", parent_id: null },
+    { id: "climatizacion", parent_id: "electrohogar" },
+    { id: "ventiladores", parent_id: "climatizacion" },
+    { id: "tecnologia", parent_id: null },
+  ]);
+  assert.deepEqual(caminos.get("ventiladores"), CAMINO_VENTILADOR);
+  assert.deepEqual(caminos.get("tecnologia"), ["tecnologia"]);
+});
+
+test("un ciclo en los datos no cuelga la resolución", () => {
+  // No debería pasar (hay FK), pero si pasa es mejor un camino raro que un
+  // proceso colgado.
+  const caminos = construirCaminos([
+    { id: "a", parent_id: "b" },
+    { id: "b", parent_id: "a" },
+  ]);
+  assert.ok(caminos.get("a")!.length <= 20);
 });

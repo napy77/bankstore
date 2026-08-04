@@ -4,9 +4,13 @@ import { pool } from "../db.js";
 import { HttpError } from "../middleware/error.js";
 import { config } from "../config.js";
 import { quote, availableInstallments } from "../lib/installments.js";
-import { applyCaps, resolveBenefit, type AgreementRow, type ProductOfferRow } from "../lib/agreements.js";
+import {
+  applyCaps, resolveBenefit, construirCaminos,
+  type AgreementRow, type ProductOfferRow,
+} from "../lib/agreements.js";
 import { breakdown } from "../lib/units.js";
 import { round2 } from "../lib/money.js";
+import { cargarContexto, pesoPorComercio, cotizarComercios, totalizarEnvio } from "../lib/shipping-db.js";
 
 export const catalogRouter = Router();
 
@@ -55,6 +59,17 @@ async function offersFor(productIds: string[]): Promise<Map<string, ProductOffer
   return map;
 }
 
+/**
+ * Camino de cada categoría hasta su raíz. Hace falta para resolver los
+ * acuerdos: uno sobre "Electrohogar" cubre también los ventiladores.
+ */
+async function categoryPaths(): Promise<Map<string, string[]>> {
+  const { rows } = await pool.query<{ id: string; parent_id: string | null }>(
+    "SELECT id, parent_id FROM product_categories"
+  );
+  return construirCaminos(rows);
+}
+
 async function activeAgreements(): Promise<AgreementRow[]> {
   const { rows } = await pool.query<AgreementRow>(
     `SELECT id, bank_id, merchant_id, category_id, max_cuotas, discount_percent,
@@ -80,7 +95,8 @@ function bestBenefit(
   product: ProductRow,
   offers: ProductOfferRow[],
   agreements: AgreementRow[],
-  bankNames: Map<string, string>
+  bankNames: Map<string, string>,
+  caminos: Map<string, string[]>
 ) {
   const bankIds = new Set([...offers.map((o) => o.bank_id), ...agreements.map((a) => a.bank_id)]);
   let best = null as null | {
@@ -91,7 +107,7 @@ function bestBenefit(
     const benefit = resolveBenefit(
       bankId,
       product.merchant_id,
-      product.category_id,
+      caminos.get(product.category_id) ?? [product.category_id],
       offers.find((o) => o.bank_id === bankId),
       agreements
     );
@@ -190,7 +206,7 @@ catalogRouter.get("/products", async (req, res, next) => {
       params
     );
 
-    const agreements = await activeAgreements();
+    const [agreements, caminos] = await Promise.all([activeAgreements(), categoryPaths()]);
     const offers = await offersFor(rows.map((r) => r.id));
     const { rows: banks } = await pool.query<{ id: string; name: string }>(
       "SELECT id, name FROM banks WHERE active"
@@ -203,7 +219,7 @@ catalogRouter.get("/products", async (req, res, next) => {
         const productOffers = offers.get(p.id) ?? [];
         return {
           ...serializePublic(p),
-          bestOffer: bestBenefit(p, productOffers, agreements, bankNames),
+          bestOffer: bestBenefit(p, productOffers, agreements, bankNames, caminos),
           // Beneficio resuelto por banco. Va en el listado y no sólo en el
           // detalle porque la tienda necesita repintar las cards apenas el
           // cliente cambia de tarjeta, sin ir a buscar producto por producto.
@@ -212,7 +228,7 @@ catalogRouter.get("/products", async (req, res, next) => {
               ...resolveBenefit(
                 bankId,
                 p.merchant_id,
-                p.category_id,
+                caminos.get(p.category_id) ?? [p.category_id],
                 productOffers.find((o) => o.bank_id === bankId),
                 agreements
               ),
@@ -238,7 +254,7 @@ catalogRouter.get("/products/:id", async (req, res, next) => {
     const product = rows[0];
     if (!product) throw new HttpError(404, "Producto no encontrado");
 
-    const agreements = await activeAgreements();
+    const [agreements, caminos] = await Promise.all([activeAgreements(), categoryPaths()]);
     const offers = (await offersFor([product.id])).get(product.id) ?? [];
     const { rows: banks } = await pool.query<{ id: string; name: string }>(
       "SELECT id, name FROM banks WHERE active ORDER BY name"
@@ -249,7 +265,7 @@ catalogRouter.get("/products/:id", async (req, res, next) => {
         ...resolveBenefit(
           bank.id,
           product.merchant_id,
-          product.category_id,
+          caminos.get(product.category_id) ?? [product.category_id],
           offers.find((o) => o.bank_id === bank.id),
           agreements
         ),
@@ -296,7 +312,7 @@ catalogRouter.get("/banks", async (_req, res, next) => {
     const { rows: banks } = await pool.query(
       "SELECT id, name, logo_color, accent_color, text_color FROM banks WHERE active ORDER BY name"
     );
-    const agreements = await activeAgreements();
+    const [agreements, caminos] = await Promise.all([activeAgreements(), categoryPaths()]);
     res.json(
       banks.map((b) => ({
         id: b.id,
@@ -397,6 +413,11 @@ const simulateCartSchema = z.object({
   })).min(1).max(30),
   bankId: z.string(),
   installments: z.coerce.number().int().min(1).max(24).optional(),
+  /**
+   * Provincia de destino. Sin esto no se puede cotizar el envío, así que el
+   * carrito devuelve sólo la mercadería y la tienda muestra "a calcular".
+   */
+  province: z.string().max(80).optional(),
 });
 
 catalogRouter.post("/simulate-cart", async (req, res, next) => {
@@ -404,8 +425,11 @@ catalogRouter.post("/simulate-cart", async (req, res, next) => {
     const body = simulateCartSchema.parse(req.body);
     const ids = body.items.map((i) => i.productId);
 
-    const { rows: products } = await pool.query<ProductRow>(
-      `SELECT p.*, m.trade_name FROM products p JOIN merchants m ON m.id = p.merchant_id
+    const { rows: products } = await pool.query<ProductRow & {
+      ships: boolean; free_shipping_over: number | null;
+    }>(
+      `SELECT p.*, m.trade_name, m.ships, m.free_shipping_over
+       FROM products p JOIN merchants m ON m.id = p.merchant_id
        WHERE p.id = ANY($1) AND ${PUBLICABLE}`,
       [ids]
     );
@@ -414,7 +438,7 @@ catalogRouter.post("/simulate-cart", async (req, res, next) => {
     }
     const byId = new Map(products.map((p) => [p.id, p]));
 
-    const agreements = await activeAgreements();
+    const [agreements, caminos] = await Promise.all([activeAgreements(), categoryPaths()]);
     const offers = await offersFor(ids);
 
     let total = 0;
@@ -432,7 +456,7 @@ catalogRouter.post("/simulate-cart", async (req, res, next) => {
       neto = round2(neto + lineNet);
 
       const benefit = resolveBenefit(
-        body.bankId, p.merchant_id, p.category_id,
+        body.bankId, p.merchant_id, caminos.get(p.category_id) ?? [p.category_id],
         offers.get(p.id)?.find((o) => o.bank_id === body.bankId),
         agreements
       );
@@ -452,9 +476,40 @@ catalogRouter.post("/simulate-cart", async (req, res, next) => {
     });
     if (maxInterestFree === Infinity) maxInterestFree = 1;
 
+    // ── Envío ────────────────────────────────────────────────────────────────
+    // Se cotiza por comercio y entra en el monto financiado, igual que en el
+    // checkout: es la misma cuenta, así que el número que se muestra es el que
+    // se cobra.
+    let envio = { total: 0, net: 0, iva: 0 };
+    let enviosDetalle: { merchantId: string; cost: number; absorbed: boolean; reason: string }[] = [];
+
+    if (body.province) {
+      const porComercio = new Map<string, { subtotal: number; p: typeof products[number] }>();
+      for (const item of body.items) {
+        const p = byId.get(item.productId)!;
+        const acc = porComercio.get(p.merchant_id) ?? { subtotal: 0, p: p as never };
+        acc.subtotal = round2(acc.subtotal + p.price * item.quantity);
+        porComercio.set(p.merchant_id, acc);
+      }
+      const ctx = await cargarContexto(pool);
+      const pesos = await pesoPorComercio(pool, body.items);
+      const cotizados = cotizarComercios(
+        ctx, body.province,
+        [...porComercio.entries()].map(([id, v]) => ({
+          merchantId: id, subtotal: v.subtotal, weightG: pesos.get(id) ?? 0,
+          ships: v.p.ships,
+          freeShippingOver: v.p.free_shipping_over === null ? null : Number(v.p.free_shipping_over),
+        }))
+      );
+      envio = totalizarEnvio(cotizados);
+      enviosDetalle = cotizados.map((c) => ({
+        merchantId: c.merchantId, cost: c.cost, absorbed: c.absorbed, reason: c.reason,
+      }));
+    }
+
     const installments = body.installments ?? Math.max(maxInterestFree, 1);
     const result = quote({
-      amount: total, installments, maxInterestFree,
+      amount: round2(total + envio.total), installments, maxInterestFree,
       tna: config.finance.tnaDefault, vatRate: config.finance.ivaSobreIntereses,
     });
 
@@ -463,10 +518,20 @@ catalogRouter.post("/simulate-cart", async (req, res, next) => {
       maxInterestFree,
       options: availableInstallments(maxInterestFree),
       quote: result,
+      merchandise: total,
+      shipping: {
+        total: envio.total,
+        net: envio.net,
+        iva: envio.iva,
+        porComercio: enviosDetalle,
+        // Sin provincia no se puede cotizar: la tienda muestra "a calcular"
+        // en vez de un cero que parecería envío gratis.
+        cotizado: Boolean(body.province),
+      },
       taxes: {
-        net: neto,
+        net: round2(neto + envio.net),
         // Por diferencia contra el total, para que neto + IVA cierre exacto.
-        iva: round2(total - neto),
+        iva: round2(total + envio.total - neto - envio.net),
         ivaInteres: result.vatAmount,
       },
       reintegro: applyCaps(reintegroLines),
@@ -527,12 +592,12 @@ catalogRouter.post("/simulate", async (req, res, next) => {
     const product = rows[0];
     if (!product) throw new HttpError(404, "Producto no encontrado");
 
-    const agreements = await activeAgreements();
+    const [agreements, caminos] = await Promise.all([activeAgreements(), categoryPaths()]);
     const offers = (await offersFor([product.id])).get(product.id) ?? [];
     const benefit = resolveBenefit(
       body.bankId,
       product.merchant_id,
-      product.category_id,
+      caminos.get(product.category_id) ?? [product.category_id],
       offers.find((o) => o.bank_id === body.bankId),
       agreements
     );

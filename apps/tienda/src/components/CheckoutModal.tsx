@@ -83,10 +83,17 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     const ctrl = new AbortController();
     setSimLoading(true);
     setSimError(null);
+    // La provincia define la zona tarifaria. Mientras no se sepa, el envío
+    // queda "a calcular" en vez de mostrar un cero engañoso.
+    const provinciaDestino = addressId !== null
+      ? addresses.find((d) => d.id === addressId)?.province
+      : shipping.province;
+
     simulateCart(
       cart.map((i) => ({ productId: i.product.id, quantity: i.quantity })),
       selectedCard.bankId,
       installments,
+      provinciaDestino,
       ctrl.signal
     )
       .then(setSim)
@@ -96,7 +103,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       })
       .finally(() => { if (!ctrl.signal.aborted) setSimLoading(false); });
     return () => ctrl.abort();
-  }, [isOpen, cart, selectedCard?.bankId, installments]);
+  }, [isOpen, cart, selectedCard?.bankId, installments, addressId, addresses, shipping.province]);
 
   // La libreta se pide al abrir el checkout, no al montar: si el comprador
   // nunca llega a pagar, no hace falta haberla traído.
@@ -475,6 +482,44 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                     </div>
                   </div>
 
+                  {/* Envío. Se cotiza por comercio: dos vendedores, dos despachos. */}
+                  {sim && (
+                    <div className="bg-white border border-slate-200/60 rounded-2xl p-4 mt-3">
+                      <div className="flex justify-between items-start text-xs">
+                        <div>
+                          <span className="text-slate-500 font-medium">Envío</span>
+                          {!sim.shipping.cotizado && (
+                            <p className="text-[10px] text-slate-400 mt-0.5">
+                              Se calcula al cargar el domicilio.
+                            </p>
+                          )}
+                          {sim.shipping.cotizado && sim.shipping.porComercio.length > 1 && (
+                            <p className="text-[10px] text-slate-400 mt-0.5">
+                              {sim.shipping.porComercio.length} despachos: cada comercio envía lo suyo.
+                            </p>
+                          )}
+                          {sim.shipping.porComercio.some((e) => e.absorbed) && (
+                            <p className="text-[10px] text-emerald-600 font-bold mt-0.5">
+                              Bonificado por el comercio
+                            </p>
+                          )}
+                          {sim.shipping.porComercio.some((e) => e.reason === 'sin-tarifa') && (
+                            <p className="text-[10px] text-amber-600 mt-0.5">
+                              No tenemos tarifa para ese destino: te contactamos para coordinarlo.
+                            </p>
+                          )}
+                        </div>
+                        <span className={`font-bold shrink-0 ${sim.shipping.total === 0 && sim.shipping.cotizado ? 'text-emerald-600' : 'text-slate-800'}`}>
+                          {!sim.shipping.cotizado
+                            ? 'a calcular'
+                            : sim.shipping.total === 0
+                            ? 'GRATIS'
+                            : `$${sim.shipping.total.toLocaleString('es-AR', { minimumFractionDigits: 2 })}`}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
                   {/*
                     Desglose fiscal. La transparencia fiscal al consumidor
                     obliga a informar cuánto del precio es impuesto EN EL
@@ -591,7 +636,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                   <div className="bg-emerald-50/50 border border-emerald-100 rounded-2xl p-4 flex gap-3 text-xs text-slate-600">
                     <Truck size={20} className="text-emerald-600 mt-0.5 shrink-0" />
                     <p className="leading-relaxed">
-                      ¡Tu compra califica para <strong className="text-emerald-700 font-bold">Envío Express Bonificado</strong>! Recibís tu pedido de forma segura en tu domicilio dentro de las próximas 48 horas hábiles.
+                      {sim && sim.shipping.cotizado && sim.shipping.total === 0
+                        ? <>El envío de esta compra va <strong className="text-emerald-700 font-bold">sin cargo</strong>. Recibís tu pedido en el domicilio que cargues.</>
+                        : <>Coordinamos la entrega en el domicilio que cargues. El costo se calcula según destino y peso.</>}
                     </p>
                   </div>
 

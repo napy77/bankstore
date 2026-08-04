@@ -16,6 +16,12 @@
  *
  * Por encima de todo sigue estando la oferta puntual del producto
  * (product_bank_offers), que es la campaña de un artículo concreto.
+ *
+ * La categoría se compara contra el CAMINO completo del producto, no contra su
+ * hoja: un acuerdo sobre "Electrohogar" tiene que cubrir también los
+ * ventiladores, que cuelgan dos niveles más abajo. Comparar sólo la hoja hacía
+ * que cualquier producto publicado en una subcategoría perdiera sus beneficios
+ * sin que nadie se enterara.
  */
 
 import { round2 } from "./money.js";
@@ -78,27 +84,68 @@ function specificity(a: AgreementRow): number {
   return (a.merchant_id ? 2 : 0) + (a.category_id ? 1 : 0);
 }
 
+/**
+ * Cuán cerca de la hoja apunta el acuerdo.
+ *
+ * Con el camino ["electrohogar", "climatizacion", "ventiladores"], un acuerdo
+ * sobre "climatizacion" es más específico que uno sobre "electrohogar". Sin
+ * este desempate, cuál gana dependería del orden que devuelva Postgres.
+ */
+function profundidad(a: AgreementRow, camino: string[]): number {
+  if (!a.category_id) return -1;
+  return camino.indexOf(a.category_id);
+}
+
+/**
+ * Camino de cada categoría hasta su raíz, para poder resolver los acuerdos sin
+ * una consulta por producto. La tabla es chica: se carga entera y se arma en
+ * memoria.
+ */
+export function construirCaminos(
+  categorias: { id: string; parent_id: string | null }[]
+): Map<string, string[]> {
+  const padres = new Map(categorias.map((c) => [c.id, c.parent_id]));
+  const caminos = new Map<string, string[]>();
+  for (const c of categorias) {
+    const camino: string[] = [];
+    let actual: string | null = c.id;
+    // El tope evita un ciclo infinito si alguna vez quedan datos inconsistentes.
+    let vueltas = 0;
+    while (actual && vueltas++ < 20) {
+      camino.unshift(actual);
+      actual = padres.get(actual) ?? null;
+    }
+    caminos.set(c.id, camino);
+  }
+  return caminos;
+}
+
 /** El acuerdo que corresponde, o undefined si ninguno alcanza. */
 export function pickAgreement(
   agreements: AgreementRow[],
   bankId: string,
   merchantId: string,
-  categoryId: string
+  /** Camino de la categoría, de la raíz a la hoja. */
+  categoryPath: string[]
 ): AgreementRow | undefined {
   const candidates = agreements.filter(
     (a) =>
       a.bank_id === bankId &&
       (a.merchant_id === null || a.merchant_id === merchantId) &&
-      (a.category_id === null || a.category_id === categoryId)
+      // El acuerdo aplica si apunta a la categoría del producto o a cualquiera
+      // de sus ancestros.
+      (a.category_id === null || categoryPath.includes(a.category_id))
   );
   if (candidates.length === 0) return undefined;
 
   return candidates.sort((x, y) => {
     const bySpec = specificity(y) - specificity(x);
     if (bySpec !== 0) return bySpec;
-    // Empate de alcance: manda la prioridad que puso el admin, y si también
-    // empata, el que más cuotas da. El último criterio es sólo para que el
-    // resultado sea determinista y no dependa del orden que devuelva Postgres.
+    // A igual alcance, el que apunta más cerca de la hoja.
+    const byDepth = profundidad(y, categoryPath) - profundidad(x, categoryPath);
+    if (byDepth !== 0) return byDepth;
+    // Después la prioridad que puso el admin, y por último más cuotas: es sólo
+    // para que el resultado sea determinista y no dependa del orden de Postgres.
     const byPriority = y.priority - x.priority;
     if (byPriority !== 0) return byPriority;
     return y.max_cuotas - x.max_cuotas;
@@ -108,11 +155,14 @@ export function pickAgreement(
 export function resolveBenefit(
   bankId: string,
   merchantId: string,
-  categoryId: string,
+  /** Camino de la categoría (raíz→hoja), o la hoja sola si no hay árbol. */
+  categoryPath: string[] | string,
   offer: ProductOfferRow | undefined,
   agreements: AgreementRow[]
 ): Benefit {
-  const agreement = pickAgreement(agreements, bankId, merchantId, categoryId);
+  const camino = Array.isArray(categoryPath) ? categoryPath : [categoryPath];
+  const categoryId = camino[camino.length - 1] ?? "";
+  const agreement = pickAgreement(agreements, bankId, merchantId, camino);
 
   if (offer) {
     const reintegro = Math.min(offer.discount_percent + offer.extra_reintegro_percent, 1);

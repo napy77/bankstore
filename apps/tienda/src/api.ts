@@ -233,6 +233,16 @@ export interface CartSimulation {
   maxInterestFree: number;
   options: number[];
   quote: Simulation['quote'];
+  /** Sólo la mercadería, sin envío. */
+  merchandise: number;
+  shipping: {
+    total: number;
+    net: number;
+    iva: number;
+    porComercio: { merchantId: string; cost: number; absorbed: boolean; reason: string }[];
+    /** false cuando todavía no se sabe el destino: se muestra "a calcular". */
+    cotizado: boolean;
+  };
   taxes: { net: number; iva: number; ivaInteres: number };
   reintegro: number;
 }
@@ -250,12 +260,14 @@ export async function simulateCart(
   items: { productId: string; quantity: number }[],
   bankId: string,
   installments?: number,
+  /** Provincia de destino. Sin esto el envío queda "a calcular". */
+  province?: string,
   signal?: AbortSignal
 ): Promise<CartSimulation> {
   const res = await fetch(`${BASE}/api/catalog/simulate-cart`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items, bankId, installments }),
+    body: JSON.stringify({ items, bankId, installments, province }),
     signal,
   });
   const data = await res.json();
@@ -408,6 +420,8 @@ export interface ApiOrder {
   interestAmount: number;
   installmentPrice: number;
   reintegroAmount: number;
+  shipping_cost: number;
+  shippingTaxes: { net: number; iva: number };
   taxes: { net: number; iva: number; ivaInteres: number };
   tna: number;
   tea: number;

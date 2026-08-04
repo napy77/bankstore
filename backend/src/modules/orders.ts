@@ -4,10 +4,16 @@ import { pool } from "../db.js";
 import { HttpError } from "../middleware/error.js";
 import { config } from "../config.js";
 import { quote } from "../lib/installments.js";
-import { applyCaps, resolveBenefit, type AgreementRow, type ProductOfferRow } from "../lib/agreements.js";
+import {
+  applyCaps, resolveBenefit, construirCaminos,
+  type AgreementRow, type ProductOfferRow,
+} from "../lib/agreements.js";
 import { round2 } from "../lib/money.js";
 import { breakdown } from "../lib/units.js";
 import { addressSchema } from "./addresses.js";
+import {
+  cargarContexto, pesoPorComercio, cotizarComercios, totalizarEnvio,
+} from "../lib/shipping-db.js";
 
 export const ordersRouter = Router();
 
@@ -67,6 +73,8 @@ interface ProductoConComercio {
   commission_percent: number;
   absorbs_installment_cost: boolean;
   settlement_days: number;
+  ships: boolean;
+  free_shipping_over: number | null;
 }
 
 interface LineaResuelta {
@@ -125,7 +133,8 @@ ordersRouter.post("/", async (req, res, next) => {
       `SELECT p.id, p.name, p.price, p.original_price, p.category_id, p.stock, p.iva_rate,
               p.kind, p.merchant_id,
               m.status AS merchant_status, m.trade_name, m.commission_percent,
-              m.absorbs_installment_cost, m.settlement_days
+              m.absorbs_installment_cost, m.settlement_days,
+              m.ships, m.free_shipping_over
        FROM products p JOIN merchants m ON m.id = p.merchant_id
        WHERE p.id = ANY($1) AND p.active
        ORDER BY p.id
@@ -153,6 +162,13 @@ ordersRouter.post("/", async (req, res, next) => {
          AND (valid_to   IS NULL OR valid_to   >= CURRENT_DATE)`,
       [card.bank_id, merchantIds]
     );
+    // Los acuerdos por categoría se heredan por rama, así que hace falta el
+    // camino de cada una: uno sobre "Electrohogar" cubre a los ventiladores.
+    const { rows: cats } = await client.query<{ id: string; parent_id: string | null }>(
+      "SELECT id, parent_id FROM product_categories"
+    );
+    const caminos = construirCaminos(cats);
+
     const { rows: offers } = await client.query<ProductOfferRow>(
       `SELECT product_id, bank_id, max_cuotas, discount_percent, extra_reintegro_percent
        FROM product_bank_offers WHERE product_id = ANY($1) AND bank_id = $2`,
@@ -182,7 +198,7 @@ ordersRouter.post("/", async (req, res, next) => {
       const benefit = resolveBenefit(
         card.bank_id,
         product.merchant_id,
-        product.category_id,
+        caminos.get(product.category_id) ?? [product.category_id],
         offers.find((o) => o.product_id === product.id),
         agreements
       );
@@ -210,22 +226,6 @@ ordersRouter.post("/", async (req, res, next) => {
       });
     }
     if (maxInterestFree === Infinity) maxInterestFree = 1;
-
-    const financing = quote({
-      amount: saleTotal,
-      installments: body.installments,
-      maxInterestFree,
-      tna: config.finance.tnaDefault,
-      vatRate: config.finance.ivaSobreIntereses,
-    });
-
-    if (Number(card.available_limit) < financing.totalAmount) {
-      throw new HttpError(
-        400,
-        `El límite disponible de la tarjeta ($${Number(card.available_limit).toLocaleString("es-AR")}) ` +
-          `no alcanza para $${financing.totalAmount.toLocaleString("es-AR")}`
-      );
-    }
 
     // ── Domicilio de entrega ─────────────────────────────────────────────────
     // Sólo hace falta si hay algo que despachar. Un carrito de puros servicios
@@ -261,6 +261,53 @@ ordersRouter.post("/", async (req, res, next) => {
 
     if (hayFisicos && !direccion) {
       throw new HttpError(400, "Falta el domicilio de entrega");
+    }
+
+    // ── Envío ────────────────────────────────────────────────────────────────
+    // Se cotiza por comercio y se suma al monto financiado: el envío entra en
+    // el plan de cuotas como cualquier otro cargo.
+    const porComercioPrevio = new Map<string, { subtotal: number; p: ProductoConComercio }>();
+    for (const l of lineas) {
+      const acc = porComercioPrevio.get(l.product.merchant_id) ?? { subtotal: 0, p: l.product };
+      acc.subtotal = round2(acc.subtotal + l.lineTotal);
+      porComercioPrevio.set(l.product.merchant_id, acc);
+    }
+
+    let enviosPorComercio = new Map<string, ReturnType<typeof cotizarComercios>[number]>();
+    let envioTotal = { total: 0, net: 0, iva: 0 };
+
+    if (direccion) {
+      const ctxEnvio = await cargarContexto(client);
+      const pesos = await pesoPorComercio(client, body.items);
+      const cotizados = cotizarComercios(
+        ctxEnvio,
+        direccion.province,
+        [...porComercioPrevio.entries()].map(([id, v]) => ({
+          merchantId: id,
+          subtotal: v.subtotal,
+          weightG: pesos.get(id) ?? 0,
+          ships: v.p.ships,
+          freeShippingOver: v.p.free_shipping_over === null ? null : Number(v.p.free_shipping_over),
+        }))
+      );
+      enviosPorComercio = new Map(cotizados.map((c) => [c.merchantId, c]));
+      envioTotal = totalizarEnvio(cotizados);
+    }
+
+    const financing = quote({
+      amount: round2(saleTotal + envioTotal.total),
+      installments: body.installments,
+      maxInterestFree,
+      tna: config.finance.tnaDefault,
+      vatRate: config.finance.ivaSobreIntereses,
+    });
+
+    if (Number(card.available_limit) < financing.totalAmount) {
+      throw new HttpError(
+        400,
+        `El límite disponible de la tarjeta ($${Number(card.available_limit).toLocaleString("es-AR")}) ` +
+          `no alcanza para $${financing.totalAmount.toLocaleString("es-AR")}`
+      );
     }
 
     const reintegro = applyCaps(reintegroLines);
@@ -321,9 +368,9 @@ ordersRouter.post("/", async (req, res, next) => {
                            net_amount, iva_amount, iva_interes_amount,
                            shipping_address_id, ship_recipient, ship_phone, ship_street,
                            ship_number, ship_floor_apt, ship_zip, ship_city, ship_province,
-                           ship_notes)
+                           ship_notes, shipping_cost, shipping_net, shipping_iva)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
-               $23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
+               $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35)
        RETURNING id`,
       [
         next_number, userId, card.id, card.bank_id, card.bank_name, card.brand, card.last4,
@@ -343,6 +390,7 @@ ordersRouter.post("/", async (req, res, next) => {
         direccion?.floor_apt ?? null, direccion?.zip ?? null,
         direccion?.city ?? null, direccion?.province ?? null,
         direccion?.notes ?? null,
+        envioTotal.total, envioTotal.net, envioTotal.iva,
       ]
     );
 
@@ -361,7 +409,11 @@ ordersRouter.post("/", async (req, res, next) => {
         ? round2(costoFinancieroTotal * participacion)
         : 0;
 
-      const payout = round2(grupo.subtotal - commissionAmount - installmentCost);
+      const envio = enviosPorComercio.get(merchantId);
+      // Si el comercio bonificó el envío, ese costo sale de su liquidación:
+      // es el precio de la promesa de "envío gratis".
+      const envioAbsorbido = envio?.absorbed ? envio.listCost : 0;
+      const payout = round2(grupo.subtotal - commissionAmount - installmentCost - envioAbsorbido);
 
       // Numeración propia de cada comercio, la que usa para su gestión interna.
       const {
@@ -377,11 +429,18 @@ ordersRouter.post("/", async (req, res, next) => {
         `INSERT INTO merchant_orders (order_id, merchant_id, merchant_order_number, subtotal,
                                       net_subtotal, iva_subtotal,
                                       commission_percent, commission_amount, installment_cost,
-                                      payout_amount, settlement_date)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, CURRENT_DATE + $11::int)
+                                      payout_amount, settlement_date,
+                                      shipping_cost, shipping_absorbed, shipping_zone,
+                                      shipping_weight_g)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, CURRENT_DATE + $11::int, $12,$13,$14,$15)
          RETURNING id`,
         [order.id, merchantId, next_mo, grupo.subtotal, netoComercio, ivaComercio,
-         commissionPercent, commissionAmount, installmentCost, payout, merchant.settlement_days]
+         commissionPercent, commissionAmount, installmentCost, payout, merchant.settlement_days,
+         // El costo de LISTA, no el cobrado: cuando el envío va bonificado el
+         // comprador no lo paga pero el comercio sí lo absorbe, y la
+         // liquidación tiene que reflejarlo.
+         envio?.listCost ?? 0, envio?.absorbed ?? false,
+         envio?.zoneId || null, envio?.weightG ?? 0]
       );
 
       for (const linea of grupo.lineas) {
@@ -429,6 +488,7 @@ async function getOrder(orderId: number, userId: number) {
   const { rows: grupos } = await pool.query(
     `SELECT mo.id, mo.merchant_id, m.trade_name, mo.merchant_order_number, mo.status,
             mo.subtotal, mo.net_subtotal, mo.iva_subtotal,
+            mo.shipping_cost, mo.shipping_absorbed, mo.shipping_zone,
             COALESCE(json_agg(json_build_object(
               'productId', i.product_id, 'productName', i.product_name,
               'quantity', i.quantity, 'price', i.unit_price,
@@ -457,6 +517,8 @@ async function getOrder(orderId: number, userId: number) {
       subtotal: g.subtotal,
       netSubtotal: g.net_subtotal,
       ivaSubtotal: g.iva_subtotal,
+      shippingCost: g.shipping_cost,
+      shippingAbsorbed: g.shipping_absorbed,
       items: g.items,
     })),
     // Aplanado, para el comprobante y para quien no le interesa el corte.
@@ -484,6 +546,8 @@ async function getOrder(orderId: number, userId: number) {
     tna: order.tna,
     tea: order.tea,
     cft: order.cft,
+    shipping_cost: order.shipping_cost,
+    shippingTaxes: { net: order.shipping_net, iva: order.shipping_iva },
     // El domicilio congelado al vender. Null en compras de puros servicios.
     shipping: order.ship_street ? {
       recipient: order.ship_recipient,
